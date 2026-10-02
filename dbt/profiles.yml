@@ -1,0 +1,16 @@
+# Paths come from environment variables set by `fcp dbt` (src/fcp/transform/dbt.py),
+# so dbt reads the same Iceberg catalog the loaders write.
+fcp:
+  target: local
+  outputs:
+    local:
+      type: duckdb
+      path: "{{ env_var('FCP_DUCKDB_PATH') }}"
+      threads: 4
+      plugins:
+        - module: iceberg
+          config:
+            catalog: fcp
+            type: sql
+            uri: "{{ env_var('FCP_ICEBERG_URI') }}"
+            warehouse: "{{ env_var('FCP_ICEBERG_WAREHOUSE') }}"

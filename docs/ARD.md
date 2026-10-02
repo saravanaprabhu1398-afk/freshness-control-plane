@@ -110,6 +110,27 @@ The diagram source is [`diagrams/src/architecture.py`](diagrams/src/architecture
 - **Decision:** Contracts and freshness metadata live first in Postgres (`freshness.contract`, `freshness.sla_breach`). They are mirrored to Unity Catalog OSS as table properties and tags when it is enabled.
 - **Consequences:** The core demo has no dependency on Unity Catalog, and the catalog integration is still shown.
 
+### ADR-009 — Positions go to a separate table that CDC does not capture
+- **Context:** An airborne aircraft's position changes on every poll. If positions lived in `source.flight_state`, every poll would emit hundreds of CDC events and re-embeddings that carry no business meaning. That would defeat selective re-indexing.
+- **Decision:** `source.*` holds business facts only (status, airports, times). Positions go to `telemetry.flight_position`, which is not part of the Debezium publication. Re-verification timestamps go to `freshness.registry`, which is also not captured.
+- **Consequences:**
+  - Measured on the first two live polls (2026-10-02): of 583 tracked flights, 448 (77%) produced no write to `source.*`. Only 36 real status changes and 99 new flights became change events.
+  - The agent reads positions from telemetry when it needs them, but positions never trigger re-indexing.
+
+### ADR-010 — Two freshness clocks, chosen per contract
+- **Context:** "Fresh" means different things for different data. A live flight status is fresh if we re-checked it minutes ago. A BTS monthly statistic is "fresh" if it is the newest month BTS has published, even though that month ended 60+ days ago. One timestamp cannot express both.
+- **Decision:** The registry keeps `last_verified_at` (when we last confirmed the value against its source) and `data_as_of` (the time the value describes). Each contract names the clock it measures (`measure` in `freshness_sla.yaml`).
+- **Consequences:**
+  - SLAs stay meaningful. `flight_status` is 15 min on `last_verified_at`; `fare_baseline` is 550 days on `data_as_of`, which is honest about DB1B's publication lag.
+  - The agent can say both "checked 2 minutes ago" and "describes July 2026".
+
+### ADR-011 — The fare baseline is the newest DB1B quarter, about 15 months old
+- **Context:** In October 2026 the newest published DB1B quarter is 2025 Q2. BTS releases DB1B about 15 months after the quarter ends.
+- **Decision:** Use it anyway, as the real historical baseline. Record its age through the `fare_baseline` contract, and require answers that use it to name the quarter.
+- **Consequences:**
+  - Fares in the demo describe 2025 Q2 price levels, and the case study says so.
+  - Simulated drift (Phase 2) moves current fares away from this baseline. Drift is always labelled as simulated.
+
 ## 5. Deployment view (local)
 
 ```mermaid

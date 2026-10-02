@@ -4,6 +4,9 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
 .ipynb_checkpoints/
 
 # Secrets
@@ -11,8 +14,9 @@ venv/
 *.env
 credentials*.json
 
-# Data
+# Data (downloads, recordings, local lake)
 data/
+warehouse/
 *.parquet
 *.csv.gz
 
@@ -20,6 +24,7 @@ data/
 dbt/target/
 dbt/dbt_packages/
 dbt/logs/
+dbt/.user.yml
 
 # Terraform
 .terraform/

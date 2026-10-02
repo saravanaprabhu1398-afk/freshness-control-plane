@@ -1,0 +1,29 @@
+version: 2
+
+models:
+  - name: stg_bts_ontime
+    description: Typed BTS on-time records for flights touching a tracked airport.
+    columns:
+      - name: flight_date
+        data_tests: [not_null]
+      - name: carrier
+        data_tests: [not_null]
+      - name: origin
+        data_tests: [not_null]
+      - name: dest
+        data_tests: [not_null]
+      - name: sched_dep_hour_local
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23]
+              config:
+                where: "sched_dep_hour_local is not null"
+
+  - name: stg_db1b_market
+    description: Typed DB1B market records between tracked airports.
+    columns:
+      - name: mkt_id
+        data_tests: [not_null, unique]
+      - name: fare_usd
+        data_tests: [not_null]

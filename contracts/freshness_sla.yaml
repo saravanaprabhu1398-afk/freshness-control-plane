@@ -1,25 +1,41 @@
-# Freshness SLA data contracts (Phase 4).
-# The agent refuses to present an answer with full confidence if any cited record's
-# last_verified_timestamp is older than max_age for its source.
-version: 1
+# Freshness SLA data contracts (PRD FR-7, ARD AR-5). Loaded into freshness.contract by
+# `fcp contracts sync`; enforced from Phase 4. Changing a value needs no deploy.
+#
+# Each contract measures one of two clocks (see db/init/01_schema.sql):
+#   last_verified_at : when we last confirmed the value against its source
+#   data_as_of       : the point in time the value describes
+version: 2
 contracts:
-  - source: flight_status
-    origin: opensky
-    max_age: 15m
+  - name: flight_status
+    measure: last_verified_at
+    max_age: 15 minutes
     on_breach: flag
-  - source: schedule
-    origin: opensky
-    max_age: 6h
+    description: Live flight state from OpenSky. Polled every 5 minutes; 3 missed polls = stale.
+
+  - name: fare
+    measure: last_verified_at
+    max_age: 24 hours
     on_breach: flag
-  - source: on_time_performance
-    origin: bts
-    max_age: 45d   # BTS publishes monthly
-    on_breach: flag
-  - source: fare
-    origin: amadeus_snapshot+simulated_drift
-    max_age: 24h
-    on_breach: flag
-  - source: airport_reference
-    origin: ourairports
-    max_age: 90d
+    description: Current fare per route and carrier (DB1B baseline plus simulated drift from Phase 2).
+
+  - name: airport_reference
+    measure: last_verified_at
+    max_age: 14 days
     on_breach: warn
+    description: OurAirports reference data, refreshed weekly.
+
+  - name: on_time_performance
+    measure: data_as_of
+    max_age: 100 days
+    on_breach: warn
+    description: >
+      BTS on-time data. BTS publishes about 60 days after month end, so the newest month is
+      normally 60-95 days old; 100 days means one publication was missed.
+
+  - name: fare_baseline
+    measure: data_as_of
+    max_age: 550 days
+    on_breach: warn
+    description: >
+      BTS DB1B quarter behind the fare baseline. DB1B is published ~15 months after the
+      quarter ends, so this baseline is always old. Answers using it must say which quarter.
