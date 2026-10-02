@@ -10,47 +10,20 @@ This document covers the system's components, how data flows between them, the a
 
 ## 1. System context
 
-```
-            ┌───────────── External sources (free tier) ──────────────┐
-            │  OpenSky API    BTS On-Time    BTS DB1B    OurAirports  │
-            └──────┬──────────────┬────────────┬────────────┬─────────┘
-                   │ poll         │ monthly    │ quarterly  │ one-off
-                   ▼              ▼            ▼            ▼
-            ┌───────────────── Ingestion (Dagster assets) ────────────┐
-            │  pollers · fare-drift simulator · rate limiter         │
-            └──────┬───────────────────────────────────────┬──────────┘
-                   │ upsert                               │ append
-                   ▼                                      ▼
-        ┌─────────────────────┐                 ┌──────────────────────┐
-        │ Postgres: source.*  │                 │ Iceberg: raw.*       │
-        │ (operational state) │                 │ (history / baseline) │
-        └─────────┬───────────┘                 └──────────┬───────────┘
-                  │ WAL (logical replication)              │ dbt
-                  ▼                                        ▼
-        ┌─────────────────────┐                 ┌──────────────────────┐
-        │ Debezium → Kafka    │                 │ dbt marts (DuckDB)   │
-        │ topics per table    │                 │ baseline / ground    │
-        └─────────┬───────────┘                 │ truth for eval       │
-                  ▼                             └──────────────────────┘
-        ┌──────────────────────────────┐
-        │ Re-index consumer            │──▶ metrics.reindex_log
-        │ diff → chunk → hash → embed  │
-        └───────┬──────────────┬───────┘
-                ▼              ▼
-     ┌──────────────────┐  ┌───────────────────────┐   ┌─────────────────┐
-     │ pgvector:        │  │ freshness.registry    │◀──│ SLA enforcer    │
-     │ index.chunks     │  │ last_verified_at      │   │ contracts/*.yaml│
-     └────────┬─────────┘  └──────────┬────────────┘   └──────┬──────────┘
-              │                       │                       ▼
-              ▼                       ▼               freshness.sla_breach
-        ┌──────────────────────────────────────┐
-        │ Freshness-aware agent (Claude)       │──▶ answer + freshness label
-        └──────────────────────────────────────┘
-              ▲                                    ┌───────────────────────┐
-        eval harness (golden set, drift inject)    │ Dashboard (Streamlit) │
-                                                   │ + Unity Catalog (OSS) │
-                                                   └───────────────────────┘
-```
+![Freshness Control Plane system architecture](diagrams/architecture.svg)
+
+**Change hot path** (purple, numbered in the diagram):
+
+| Step | What happens |
+|---|---|
+| ① | A poller upserts the current state into `source.*`. If nothing changed, nothing is written; only `last_verified_at` is refreshed. |
+| ② | Postgres writes the change to its WAL, and Debezium reads it through a logical replication slot. |
+| ③ | Debezium publishes `{op, before, after, ts_ms}` to the table's Kafka topic. |
+| ④ | The re-index consumer reads events in micro-batches. |
+| ⑤ | Only chunks whose content hash changed are re-embedded. The vector and the freshness registry are written in one transaction. |
+| ⑥ | At query time, the agent retrieves chunks and checks their freshness against the contracts before answering. |
+
+The diagram source is [`diagrams/src/architecture.py`](diagrams/src/architecture.py).
 
 ## 2. Components
 
@@ -138,6 +111,68 @@ This document covers the system's components, how data flows between them, the a
 - **Consequences:** The core demo has no dependency on Unity Catalog, and the catalog integration is still shown.
 
 ## 5. Deployment view (local)
+
+```mermaid
+flowchart TB
+  ext["<b>OpenSky · BTS · OurAirports</b><br/><small>HTTPS · free tier · rate-limited</small>"]
+  claude["<b>Anthropic API</b><br/><small>Claude · HTTPS</small>"]
+
+  subgraph orch["Orchestration"]
+    direction LR
+    dweb["<b>dagster-webserver</b><br/><small>UI · :3000</small>"]
+    ddaemon["<b>dagster-daemon</b><br/><small>pollers · schedules · sensors</small>"]
+  end
+
+  subgraph app["Application"]
+    direction LR
+    agent["<b>agent</b><br/><small>CLI / API</small>"]
+    dash["<b>dashboard</b><br/><small>Streamlit · :8501</small>"]
+  end
+
+  subgraph data["Data"]
+    direction LR
+    pg[("<b>postgres</b><br/><small>Postgres 16 + pgvector · :5432</small>")]
+    wh[("<b>warehouse</b><br/><small>Iceberg + DuckDB volume</small>")]
+  end
+
+  subgraph cdc["Change capture"]
+    direction LR
+    connect["<b>connect</b><br/><small>Debezium · :8083</small>"]
+    kafka["<b>kafka</b><br/><small>KRaft · :9092</small>"]
+    consumer["<b>reindex-consumer</b><br/><small>Python 3.12</small>"]
+  end
+
+  uc["<b>unity-catalog</b><br/><small>optional profile · :8080</small>"]
+
+  ext -- "poll" --> ddaemon
+  claude <-- "tool-use loop" --> agent
+  ddaemon -- "upsert" --> pg
+  ddaemon -- "batch loads · dbt" --> wh
+  agent -- "retrieve + freshness" --> pg
+  dash -- "metrics.*" --> pg
+  pg -- "WAL" --> connect
+  connect -- "events" --> kafka
+  kafka -- "consume" --> consumer
+  consumer -- "vectors + registry" --> pg
+  ddaemon -. "mirror contracts" .-> uc
+
+  classDef store fill:#F0FDFA,stroke:#0F766E,color:#0F172A
+  classDef stream fill:#FFF7ED,stroke:#C2410C,color:#0F172A
+  classDef svc fill:#EFF6FF,stroke:#1D4ED8,color:#0F172A
+  classDef orchc fill:#EEF2FF,stroke:#4338CA,color:#0F172A
+  classDef extc fill:#F8FAFC,stroke:#475569,color:#0F172A
+  classDef opt fill:#FFFFFF,stroke:#64748B,color:#334155,stroke-dasharray:5 4
+  class pg,wh store
+  class connect,kafka,consumer stream
+  class agent,dash svc
+  class dweb,ddaemon orchc
+  class ext,claude extc
+  class uc opt
+  style orch fill:#FFFFFF,stroke:#C7D2FE
+  style app fill:#FFFFFF,stroke:#BFDBFE
+  style data fill:#FFFFFF,stroke:#99F6E4
+  style cdc fill:#FFFFFF,stroke:#FED7AA
+```
 
 `docker-compose.yml` runs these services:
 

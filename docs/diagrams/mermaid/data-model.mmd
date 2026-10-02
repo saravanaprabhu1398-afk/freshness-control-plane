@@ -1,0 +1,68 @@
+erDiagram
+  SOURCE_FLIGHT_STATE ||--o| INDEX_CHUNKS : "rendered as"
+  SOURCE_FARE ||--o| INDEX_CHUNKS : "rendered as"
+  SOURCE_AIRPORT ||--o| INDEX_CHUNKS : "rendered as"
+  INDEX_CHUNKS ||--|| FRESHNESS_REGISTRY : "record_key"
+  FRESHNESS_CONTRACT ||--o{ FRESHNESS_REGISTRY : "governs (by source)"
+  FRESHNESS_CONTRACT ||--o{ FRESHNESS_SLA_BREACH : "violated in"
+  FRESHNESS_REGISTRY ||--o{ FRESHNESS_SLA_BREACH : "breaches"
+  INDEX_CHUNKS ||--o{ METRICS_REINDEX_LOG : "re-embedded in"
+
+  SOURCE_FLIGHT_STATE {
+    text flight_key PK "icao24:first_seen"
+    text icao24
+    text callsign
+    text est_dep_airport
+    text est_arr_airport
+    text status "scheduled|airborne|landed|diverted"
+    timestamptz last_verified_at
+  }
+  SOURCE_FARE {
+    text fare_key PK "origin:dest:carrier:cabin"
+    numeric fare_usd
+    numeric baseline_usd "DB1B median"
+    text source "bts_db1b|drift_sim"
+    boolean simulated
+    timestamptz last_verified_at
+  }
+  SOURCE_AIRPORT {
+    text ident PK
+    text iata
+    text name
+    timestamptz last_verified_at
+  }
+  INDEX_CHUNKS {
+    text chunk_id PK "table:pk"
+    text record_key FK
+    text chunk_text
+    char content_hash "sha256"
+    vector embedding "384-d"
+    timestamptz data_as_of
+    timestamptz indexed_at
+  }
+  FRESHNESS_REGISTRY {
+    text record_key PK
+    text source FK
+    timestamptz last_verified_at
+    timestamptz last_changed_at
+  }
+  FRESHNESS_CONTRACT {
+    text source PK
+    interval max_age
+    text on_breach
+    int version
+  }
+  FRESHNESS_SLA_BREACH {
+    bigint id PK
+    text record_key FK
+    interval age
+    timestamptz detected_at
+    timestamptz resolved_at
+  }
+  METRICS_REINDEX_LOG {
+    bigint id PK
+    text record_key FK
+    int chunks_reembedded
+    int chunks_skipped_same_hash
+    int e2e_latency_ms
+  }

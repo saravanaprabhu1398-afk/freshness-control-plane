@@ -1,0 +1,17 @@
+flowchart TD
+  start(["Cited chunks + freshness results"]) --> any{"Any chunk<br/>retrieved?"}
+  any -- no --> ca["CANNOT ANSWER RELIABLY"]
+  any -- yes --> fresh{"All cited chunks<br/>within max_age?"}
+  fresh -- yes --> v["VERIFIED"]
+  fresh -- no --> severe{"All key chunks older<br/>than 2 × max_age?"}
+  severe -- yes --> ca
+  severe -- no --> ps["POSSIBLY STALE<br/><small>as of min(data_as_of)</small>"]
+
+  classDef ok fill:#DCFCE7,stroke:#166534,color:#14532D
+  classDef warn fill:#FEF3C7,stroke:#92400E,color:#78350F
+  classDef bad fill:#FEE2E2,stroke:#991B1B,color:#7F1D1D
+  classDef q fill:#F8FAFC,stroke:#475569,color:#0F172A
+  class v ok
+  class ps warn
+  class ca bad
+  class start,any,fresh,severe q
