@@ -8,7 +8,7 @@ Using real aviation data rather than a simulated/toy dataset:
 - **OpenSky Network** (free) — real-time and historical flight tracking data: delays, cancellations, gate/status changes. Use this as the primary source of genuine, naturally-occurring "drift" events.
 - **US DOT BTS (Bureau of Transportation Statistics)** (free) — historical on-time performance data, monthly updates, for a stable baseline/ground-truth layer.
 - **OurAirports / OpenFlights** (free static datasets) — airport/route reference data for the stable layer that drift is compared against.
-- **Fares**: pull a real snapshot from a free-tier fare API (e.g. Amadeus for Developers sandbox) as the initial dataset, then programmatically simulate realistic fare-change patterns on top of it rather than fighting live-pricing rate limits — this is a legitimate, explainable choice for a portfolio project.
+- **Fares** _(superseded — see ADR-002: Amadeus Self-Service shut down 2026-07-17; using BTS DB1B)_: pull a real snapshot from a free-tier fare API (e.g. Amadeus for Developers sandbox) as the initial dataset, then programmatically simulate realistic fare-change patterns on top of it rather than fighting live-pricing rate limits — this is a legitimate, explainable choice for a portfolio project.
 
 ## Goal
 Build a control plane that: (1) detects when source aviation data (flight status, schedule, fare) changes, (2) selectively re-indexes only what changed rather than the full dataset, (3) enforces a freshness SLA, and (4) makes an AI agent answering ops/fare questions aware of and transparent about data staleness — rather than confidently citing outdated information.

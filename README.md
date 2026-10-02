@@ -18,15 +18,21 @@ It is designed as a standalone sub-system that plugs into [FlightPulse](#flightp
 | [OpenSky Network](https://opensky-network.org/) | Live/historical flight states, delays, status changes (primary drift source) | **Real** |
 | [US DOT BTS](https://www.transtats.bts.gov/) | Historical on-time performance (ground-truth baseline) | **Real** |
 | [OurAirports](https://ourairports.com/data/) / [OpenFlights](https://openflights.org/data.html) | Airport and route reference data (stable layer) | **Real** |
-| Amadeus for Developers (sandbox) | Initial fare snapshot | **Real snapshot** |
-| Fare drift | Realistic fare-change patterns applied on top of the snapshot | **Simulated** (avoids live-pricing rate limits) |
+| [BTS DB1B](https://www.transtats.bts.gov/) (Origin & Destination Survey) | Fare baseline (route medians) | **Real** |
+| Fare drift | Realistic fare-change patterns applied on top of the baseline | **Simulated** (no free live-fare API; Amadeus Self-Service shut down 2026-07-17) |
 
 All API usage stays within free-tier limits. No scraping.
+
+## Design docs
+
+- [PRD](docs/PRD.md): problem, scope, requirements, success metrics
+- [ARD](docs/ARD.md): architecture, requirements, and decision records (ADRs)
+- [SDD](docs/SDD.md): schemas, CDC contract, re-index algorithm, agent and eval design
 
 ## Architecture
 
 ```
- OpenSky / BTS / Fares ──▶ ingestion ──▶ Postgres (source tables)
+ OpenSky / BTS / DB1B ──▶ ingestion ──▶ Postgres (source tables)
                                               │  Debezium
                                               ▼
                                         Kafka change events
