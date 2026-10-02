@@ -1,0 +1,25 @@
+# Freshness SLA data contracts (Phase 4).
+# The agent refuses to present an answer with full confidence if any cited record's
+# last_verified_timestamp is older than max_age for its source.
+version: 1
+contracts:
+  - source: flight_status
+    origin: opensky
+    max_age: 15m
+    on_breach: flag
+  - source: schedule
+    origin: opensky
+    max_age: 6h
+    on_breach: flag
+  - source: on_time_performance
+    origin: bts
+    max_age: 45d   # BTS publishes monthly
+    on_breach: flag
+  - source: fare
+    origin: amadeus_snapshot+simulated_drift
+    max_age: 24h
+    on_breach: flag
+  - source: airport_reference
+    origin: ourairports
+    max_age: 90d
+    on_breach: warn
