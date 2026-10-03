@@ -1,0 +1,28 @@
+version: 2
+
+models:
+  - name: mart_route_ontime
+    description: On-time performance per route x carrier x month (BTS, real).
+    columns:
+      - name: route_month_key
+        data_tests: [unique, not_null]
+      - name: on_time_rate
+        data_tests: [not_null]
+
+  - name: mart_airport_hourly_delay
+    description: Departure delay by tracked airport x scheduled local hour x month (BTS, real).
+    columns:
+      - name: airport_hour_key
+        data_tests: [unique, not_null]
+
+  - name: mart_fare_baseline
+    description: >
+      Median nonstop fare per route x ticketing carrier for the latest DB1B quarter (real,
+      historical). Seeds source.fare; simulated drift is applied on top in Phase 2.
+    columns:
+      - name: fare_key
+        data_tests: [unique, not_null]
+      - name: median_fare_usd
+        data_tests: [not_null]
+      - name: sample_size
+        data_tests: [not_null]

@@ -1,0 +1,23 @@
+version: 2
+
+sources:
+  - name: raw
+    description: Iceberg raw layer written by src/fcp/ingestion (PyIceberg SQL catalog).
+    schema: raw
+    meta:
+      plugin: iceberg
+    tables:
+      - name: bts_ontime
+        description: >
+          BTS Reporting Carrier On-Time Performance, flights touching a tracked airport.
+          Monthly, published ~2 months after month end. Real data.
+        meta:
+          dagster:
+            asset_key: ["raw", "bts_ontime"]
+      - name: db1b_market
+        description: >
+          BTS DB1B Market 10% ticket sample, routes between tracked airports, BulkFare = 0,
+          fare between $25 and $2,500. Quarterly, published with a long lag. Real data.
+        meta:
+          dagster:
+            asset_key: ["raw", "db1b_market"]

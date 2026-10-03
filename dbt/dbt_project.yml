@@ -1,0 +1,24 @@
+name: fcp
+version: "0.1.0"
+config-version: 2
+profile: fcp
+
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+target-path: target
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  fcp:
+    staging:
+      +materialized: view
+      +schema: staging
+    marts:
+      +materialized: table
+      +schema: marts
+
+# The iceberg plugin materialises sources into the `raw` schema. Create it once up front so
+# parallel models do not race to create it (DuckDB catalog write-write conflict).
+on-run-start:
+  - "create schema if not exists raw"

@@ -8,85 +8,100 @@
 
 ## 1. Repository layout
 
+Python code lives in one package (`src/fcp`). Everything that is not Python stays at the top level.
+
 ```
-ingestion/
-  common/ratelimit.py        token-bucket + daily budget (AR-7)
-  opensky/poller.py          states + arrivals/departures → source.flight_state
-  bts/ontime.py              monthly CSV → raw.bts_ontime (Iceberg)
-  bts/db1b.py                quarterly DB1B → raw.db1b → source.fare (baseline)
-  ourairports/load.py        airports → source.airport
-  fares/drift_sim.py         fare drift → source.fare (simulated=true)
-cdc/debezium/                connector JSON
-reindex/consumer.py          Kafka → diff → chunk → hash → embed → upsert
-reindex/chunker.py           record → chunk text templates
-reindex/full_rebuild.py      baseline benchmark only
-contracts/freshness_sla.yaml
-freshness/enforcer.py        SLA evaluation, breach logging
-agent/agent.py               Claude tool-use loop
-agent/tools.py               search_index, check_freshness, get_baseline
-eval/golden/*.yaml           golden questions
-eval/run.py                  naive vs. aware, pre/post drift
-dashboard/app.py             Streamlit
-orchestration/dagster/       assets, schedules, sensors
-dbt/                         staging + marts
+src/fcp/
+  cli.py                       `fcp` command: ingest / dbt / seed / status
+  common/                      settings, structured logging, Postgres helpers, API budget, airports
+    db.py                      change-aware upsert, freshness registry, run logging
+    ratelimit.py               daily credit budget (AR-7)
+  ingestion/
+    opensky/client.py          OAuth2, credit costs, record/replay
+    opensky/transform.py       pure parsing + flight identity (unit-tested)
+    opensky/poller.py          states (live) + flights (daily) -> source.flight_state
+    bts/ontime.py              monthly CSV -> Iceberg raw.bts_ontime
+    bts/db1b.py                quarterly CSV -> Iceberg raw.db1b_market
+    ourairports.py             -> source.airport
+    fares/baseline.py          dbt mart_fare_baseline -> source.fare
+    lake.py                    PyIceberg SQL catalog, idempotent partition replace
+  transform/dbt.py             runs dbt against the same catalog
+  freshness/contracts.py       YAML -> freshness.contract
+  orchestration/definitions.py Dagster assets, jobs, schedules
+  (Phase 2+: cdc/, reindex/, agent/, eval/, dashboard/)
+dbt/                           staging + marts over Iceberg (dbt-duckdb iceberg plugin)
+db/init/01_schema.sql          every Postgres schema (runs on first container start)
+contracts/freshness_sla.yaml   freshness SLAs
+cdc/debezium/                  connector config (Phase 2)
+eval/golden/                   golden questions (Phase 6)
+tests/unit, tests/integration
 ```
 
 ## 2. Data model (Postgres)
 
 ```mermaid
 erDiagram
+  SOURCE_FLIGHT_STATE ||--|| TELEMETRY_FLIGHT_POSITION : "latest position (not CDC)"
   SOURCE_FLIGHT_STATE ||--o| INDEX_CHUNKS : "rendered as"
   SOURCE_FARE ||--o| INDEX_CHUNKS : "rendered as"
   SOURCE_AIRPORT ||--o| INDEX_CHUNKS : "rendered as"
-  INDEX_CHUNKS ||--|| FRESHNESS_REGISTRY : "record_key"
-  FRESHNESS_CONTRACT ||--o{ FRESHNESS_REGISTRY : "governs (by source)"
-  FRESHNESS_CONTRACT ||--o{ FRESHNESS_SLA_BREACH : "violated in"
+  SOURCE_FLIGHT_STATE ||--|| FRESHNESS_REGISTRY : "record_key"
+  SOURCE_FARE ||--|| FRESHNESS_REGISTRY : "record_key"
+  SOURCE_AIRPORT ||--|| FRESHNESS_REGISTRY : "record_key"
+  FRESHNESS_CONTRACT ||--o{ FRESHNESS_REGISTRY : "governs"
   FRESHNESS_REGISTRY ||--o{ FRESHNESS_SLA_BREACH : "breaches"
   INDEX_CHUNKS ||--o{ METRICS_REINDEX_LOG : "re-embedded in"
 
   SOURCE_FLIGHT_STATE {
-    text flight_key PK "icao24:first_seen"
-    text icao24
-    text callsign
-    text est_dep_airport
-    text est_arr_airport
-    text status "scheduled|airborne|landed|diverted"
-    timestamptz last_verified_at
+    text flight_key PK "icao24:callsign:first_seen"
+    text status "airborne|on_ground|landed"
+    text near_airport "tracked IATA"
+    text est_dep_airport "ICAO, batch"
+    text est_arr_airport "ICAO, batch"
+    timestamptz first_seen
+    timestamptz last_seen
+    timestamptz updated_at "last business change"
+  }
+  TELEMETRY_FLIGHT_POSITION {
+    text flight_key PK
+    timestamptz last_observed
+    double latitude
+    double longitude
+    double baro_altitude_m
+    boolean on_ground
   }
   SOURCE_FARE {
     text fare_key PK "origin:dest:carrier:cabin"
     numeric fare_usd
     numeric baseline_usd "DB1B median"
+    text baseline_period "e.g. 2025-Q2"
     text source "bts_db1b|drift_sim"
     boolean simulated
-    timestamptz last_verified_at
   }
   SOURCE_AIRPORT {
     text ident PK
     text iata
     text name
-    timestamptz last_verified_at
   }
   INDEX_CHUNKS {
-    text chunk_id PK "table:pk"
+    text chunk_id PK
     text record_key FK
-    text chunk_text
     char content_hash "sha256"
     vector embedding "384-d"
     timestamptz data_as_of
-    timestamptz indexed_at
   }
   FRESHNESS_REGISTRY {
-    text record_key PK
-    text source FK
+    text record_key PK "table:pk or dataset:name"
+    text contract FK
     timestamptz last_verified_at
     timestamptz last_changed_at
+    timestamptz data_as_of
   }
   FRESHNESS_CONTRACT {
-    text source PK
+    text name PK
+    text measure "last_verified_at|data_as_of"
     interval max_age
-    text on_breach
-    int version
+    text on_breach "flag|warn"
   }
   FRESHNESS_SLA_BREACH {
     bigint id PK
@@ -104,51 +119,25 @@ erDiagram
   }
 ```
 
-Keys: `record_key = <table>:<pk>` joins the source rows, chunks, registry and metrics. `source` joins the registry to its contract.
+Keys: `record_key = <table>:<pk>` joins the source rows, chunks, registry and metrics. `contract` joins the registry to its contract.
 
-### 2.1 `source.*`: operational state (watched by CDC)
+### 2.1 `source.*` and `telemetry.*`
 
-```sql
-create table source.flight_state (
-  flight_key       text primary key,      -- icao24 || ':' || first_seen_epoch
-  icao24           text not null,
-  callsign         text,
-  est_dep_airport  text,                  -- ICAO
-  est_arr_airport  text,
-  first_seen       timestamptz,
-  last_seen        timestamptz,
-  status           text not null,         -- scheduled|airborne|landed|diverted|unknown
-  last_position    jsonb,                 -- {lat, lon, alt_m, velocity, ts}
-  source           text not null default 'opensky',
-  simulated        boolean not null default false,
-  fetched_at       timestamptz not null,
-  last_verified_at timestamptz not null
-);
+The full DDL is in [`db/init/01_schema.sql`](../db/init/01_schema.sql). These are the design rules it follows:
 
-create table source.fare (
-  fare_key         text primary key,      -- origin:dest:carrier:cabin
-  origin           text not null,         -- IATA
-  dest             text not null,
-  carrier          text not null,
-  cabin            text not null,
-  fare_usd         numeric(10,2) not null,
-  baseline_usd     numeric(10,2) not null, -- DB1B route median
-  effective_at     timestamptz not null,
-  source           text not null,         -- 'bts_db1b' | 'drift_sim'
-  simulated        boolean not null,
-  last_verified_at timestamptz not null
-);
+- **`source.*` changes only when a business fact changes.** `source.flight_state`, `source.fare` and `source.airport` are captured by CDC. Every write is a change-aware upsert:
 
-create table source.airport (
-  ident text primary key, iata text, name text, city text,
-  lat double precision, lon double precision, type text,
-  source text not null default 'ourairports', last_verified_at timestamptz not null
-);
-```
+  ```sql
+  insert ... on conflict (pk) do update set ...
+  where (t.business_cols) is distinct from (new_values)
+  returning pk, (xmax = 0) as inserted
+  ```
 
-**Upsert rule (ADR-001).** `ON CONFLICT (pk) DO UPDATE ... WHERE (excluded.<business cols>) IS DISTINCT FROM (t.<business cols>)`, so polls with unchanged values produce no WAL entry.
-
-**Re-verification.** A poll that sees the same values still proves the data is current. It updates only `freshness.registry.last_verified_at` (§2.3), not the `source.*` row, so it creates no CDC event and causes no re-embedding.
+  An unchanged row is not written at all, so it produces no WAL record, no Debezium event and no embedding. The integration tests check this by asserting that the row's `xmin` stays the same.
+- **High-churn observations live in `telemetry.*`.** An aircraft's position changes on every poll, but that is not a business change. `telemetry.flight_position` is excluded from the Debezium publication.
+- **Flight identity.** `flight_key = icao24:callsign:first_seen_epoch`. A sighting of the same aircraft and callsign within 6 hours of the last one is the same flight. When the next day's batch record arrives, it is matched to the live-tracked flight if our first sighting falls within `[firstSeen − 3 h, lastSeen]`.
+- **Flight status** is `airborne`, `on_ground` or `landed`. `landed` is final for a key, and batch-only fields (estimated airports, `last_seen`) are never erased by a live poll. Both rules are enforced inside the upsert with `case` / `coalesce` overrides.
+- **Fares.** `source.fare` carries `baseline_usd` and `baseline_period` (the DB1B quarter), plus `source` (`bts_db1b` or `drift_sim`) and `simulated`. Re-seeding the same quarter never overwrites a simulated fare; a new quarter resets all fares to the new baseline.
 
 ### 2.2 `index.chunks`: vector index
 
@@ -170,40 +159,35 @@ create index on index.chunks using hnsw (embedding vector_cosine_ops);
 
 ### 2.3 `freshness.*`
 
-```sql
-create table freshness.registry (
-  record_key       text primary key,      -- <table>:<pk>
-  source           text not null,
-  last_verified_at timestamptz not null,
-  last_changed_at  timestamptz not null
-);
-create table freshness.contract (           -- loaded from YAML
-  source text primary key, max_age interval not null,
-  on_breach text not null, version int not null
-);
-create table freshness.sla_breach (
-  id bigserial primary key, source text, record_key text,
-  age interval, max_age interval, detected_at timestamptz, resolved_at timestamptz
-);
-```
+`freshness.registry` has one row per source record (`<table>:<pk>`), or per lake dataset (`dataset:raw.bts_ontime`). It keeps three timestamps, and each contract measures one of the two clocks, `last_verified_at` or `data_as_of`:
 
-### 2.4 `metrics.*`
+| Column | Meaning | Written by |
+|---|---|---|
+| `last_verified_at` | When we last confirmed the value against its source | Every poll or load, changed or not |
+| `last_changed_at` | When the value last actually changed | Only on a real change |
+| `data_as_of` | The point in time the value describes (aircraft last contact, BTS month end, DB1B quarter end) | Every poll or load |
 
-```sql
-create table metrics.reindex_log (
-  id bigserial primary key, event_ts timestamptz, kafka_offset bigint,
-  source_table text, record_key text, op char(1),
-  chunks_considered int, chunks_reembedded int, chunks_skipped_same_hash int,
-  embed_ms int, e2e_latency_ms int            -- source commit → vector upsert
-);
-create table metrics.full_rebuild_log (
-  id bigserial primary key, run_ts timestamptz, total_chunks int, embed_ms int
-);
-create table metrics.agent_query_log (
-  id bigserial primary key, ts timestamptz, question text, mode text, -- naive|aware
-  cited_chunks text[], max_age interval, label text, answer text
-);
-```
+Each contract in [`contracts/freshness_sla.yaml`](../contracts/freshness_sla.yaml) says which clock its SLA uses:
+
+| Contract | Measures | Max age | Why |
+|---|---|---|---|
+| `flight_status` | `last_verified_at` | 15 min | Polled every 5 min; 3 missed polls means stale |
+| `fare` | `last_verified_at` | 24 h | Current-fare questions |
+| `airport_reference` | `last_verified_at` | 14 d | Weekly refresh |
+| `on_time_performance` | `data_as_of` | 100 d | BTS publishes about 60 days after month end |
+| `fare_baseline` | `data_as_of` | 550 d | DB1B publishes about 15 months after quarter end |
+
+`freshness.registry` is not captured by CDC, so re-verifying an unchanged record costs one small update and no embedding.
+
+### 2.4 `metrics.*` and `ops.*`
+
+| Table | Written by | Purpose |
+|---|---|---|
+| `metrics.ingest_run` | Every ingestion step, including failures (`fcp.common.db.track_run`) | Rows seen, changed and unchanged; credits used. This is the Phase 1 evidence for selective change |
+| `metrics.reindex_log` | Re-index consumer (Phase 3) | Chunks considered, re-embedded and skipped by hash; end-to-end latency |
+| `metrics.full_rebuild_log` | Full re-embed benchmark (Phase 3) | Baseline for the savings metric |
+| `metrics.agent_query_log` | Agent (Phase 5) | Question, mode, cited chunks, label |
+| `ops.api_budget` | `fcp.common.ratelimit` | Daily credits per provider and endpoint |
 
 ## 3. CDC
 
@@ -294,12 +278,15 @@ on event e:
 1. **Load contracts.** `contracts/freshness_sla.yaml` is loaded into `freshness.contract` at startup and whenever the file's hash changes (AR-5).
 2. **Run the enforcer.** A Dagster sensor runs every 60 s and executes:
    ```sql
-   select r.record_key, r.source, now() - r.last_verified_at as age, c.max_age
-   from freshness.registry r join freshness.contract c using (source)
-   where now() - r.last_verified_at > c.max_age;
+   select r.record_key, r.contract, c.max_age,
+          now() - case c.measure when 'last_verified_at' then r.last_verified_at
+                                 else r.data_as_of end as age
+   from freshness.registry r join freshness.contract c on c.name = r.contract
+   where now() - case c.measure when 'last_verified_at' then r.last_verified_at
+                                else r.data_as_of end > c.max_age;
    ```
 3. **Record breaches.** New breaches are inserted, and a breach is resolved when the record is verified again.
-4. **Roll up per source.** `breach_pct`, `p50_age` and `p95_age` per source are written to `metrics.freshness_snapshot` for the dashboard.
+4. **Roll up per contract.** `breach_pct`, `p50_age` and `p95_age` per contract are written to `metrics.freshness_snapshot` for the dashboard.
 5. **Catalog sync (optional).** When the catalog is enabled, `freshness.sla_hours` and `freshness.last_breach_at` are written as Unity Catalog table properties.
 
 ## 6. Freshness-aware agent
@@ -430,16 +417,22 @@ flowchart LR
 
 ## 8. Ingestion details
 
-| Source | Cadence | Budget / notes |
+| Source | Cadence | Cost and budget |
 |---|---|---|
-| OpenSky `/flights/arrival` and `/flights/departure` per airport | 8 airports, hourly windows | Uses OAuth2 client credentials (the token is refreshed about every 30 min); the rate limiter caps usage at **80%** of the account's daily credits |
-| OpenSky `/states/all` within a bounding box | Every 5 min, one US-region box | Area-limited calls cost fewer credits |
-| BTS On-Time | Monthly download | Bulk file; no rate concern |
-| BTS DB1B | Quarterly download | Aggregated to route × carrier × cabin medians |
-| OurAirports | Weekly | Static CSV |
-| Fare drift sim | Every 15 min | Seasonal multiplier × days-to-departure curve × N(0, σ) + Poisson(λ) shocks of ±15–40% |
+| OpenSky `/states/all`, one bounding box around all 8 airports (about 16° × 51°) | Every 5 min with credentials, every 20 min anonymous | 4 credits per call: 1,152 per day with credentials (of 3,200 allowed), 288 anonymous (of 320) |
+| OpenSky `/flights/arrival` and `/flights/departure` per airport, previous UTC day | Daily, 06:00 UTC | 30 credits × 8 airports = 240 per endpoint per day |
+| BTS On-Time | Weekly check; newest 6 months kept | Bulk download (about 32 MB per month), cached |
+| BTS DB1B Market | Weekly check; newest quarter | Bulk download (about 110 MB, 2.1 GB unzipped), cached |
+| OurAirports | Weekly | One CSV |
+| Fare drift simulator (Phase 2) | Every 15 min | Seasonality × days-to-departure curve × N(0, σ), plus Poisson(λ) shocks of ±15–40% |
 
-For demos and CI, every OpenSky response is recorded to `data/recordings/` so it can be replayed offline.
+**Budget rules.** Every OpenSky call reserves its cost in `ops.api_budget` before it is made, using one conditional update, so concurrent runs cannot overspend. If the request never reached OpenSky, the credits are refunded. After each call the budget is reconciled with OpenSky's `X-Rate-Limit-Remaining` header.
+
+**Record and replay.** With `FCP_OPENSKY_MODE=record`, every response is saved to `data/recordings/opensky/`. With `replay`, those responses are served in capture order and no credits are spent; this is used for demos and offline runs.
+
+**Lake loads are idempotent.** Each load replaces its own month or quarter in a single Iceberg snapshot (`overwrite` with a partition filter).
+
+Source details, filters and attribution are in [data-sources.md](data-sources.md).
 
 ## 9. Observability
 
@@ -458,13 +451,14 @@ For demos and CI, every OpenSky response is recorded to `data/recordings/` so it
 | Eval | Golden-set run in CI on recorded data, with the Claude call mocked for determinism |
 
 ## 11. Phase 1 build checklist
-- [ ] `docker-compose.yml` (postgres+pgvector, kafka, connect) + `Makefile` (`up`, `down`, `seed`)
-- [ ] `db/init.sql`: schemas from §2
-- [ ] `ingestion/common/ratelimit.py`
-- [ ] OpenSky poller (OAuth2, recorded replay)
-- [ ] BTS On-Time + DB1B loaders → Iceberg raw
-- [ ] OurAirports loader
-- [ ] Fare baseline from DB1B → `source.fare`
-- [ ] dbt staging + marts (`mart_route_ontime`, `mart_fare_baseline`)
-- [ ] Dagster assets and schedules for the above
-- [ ] `docs/data-sources.md`
+- [x] `docker-compose.yml` (Postgres 16 + pgvector 0.8.2, Kafka 4.3 KRaft, Debezium Connect 3.5) and `Makefile`
+- [x] `db/init/01_schema.sql`: every schema from §2
+- [x] `fcp.common.ratelimit`: daily credit budget with reconcile and refund
+- [x] OpenSky client and pollers (OAuth2, record and replay, states + flights)
+- [x] BTS On-Time and DB1B loaders → Iceberg raw
+- [x] OurAirports loader
+- [x] Fare baseline from DB1B → `source.fare`
+- [x] dbt staging + marts (`mart_route_ontime`, `mart_airport_hourly_delay`, `mart_fare_baseline`) with tests
+- [x] Dagster assets, jobs and schedules
+- [x] `docs/data-sources.md`
+- [x] CI: ruff, mypy `--strict`, and unit + integration tests against Postgres

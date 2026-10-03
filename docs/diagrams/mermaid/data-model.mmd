@@ -1,56 +1,65 @@
 erDiagram
+  SOURCE_FLIGHT_STATE ||--|| TELEMETRY_FLIGHT_POSITION : "latest position (not CDC)"
   SOURCE_FLIGHT_STATE ||--o| INDEX_CHUNKS : "rendered as"
   SOURCE_FARE ||--o| INDEX_CHUNKS : "rendered as"
   SOURCE_AIRPORT ||--o| INDEX_CHUNKS : "rendered as"
-  INDEX_CHUNKS ||--|| FRESHNESS_REGISTRY : "record_key"
-  FRESHNESS_CONTRACT ||--o{ FRESHNESS_REGISTRY : "governs (by source)"
-  FRESHNESS_CONTRACT ||--o{ FRESHNESS_SLA_BREACH : "violated in"
+  SOURCE_FLIGHT_STATE ||--|| FRESHNESS_REGISTRY : "record_key"
+  SOURCE_FARE ||--|| FRESHNESS_REGISTRY : "record_key"
+  SOURCE_AIRPORT ||--|| FRESHNESS_REGISTRY : "record_key"
+  FRESHNESS_CONTRACT ||--o{ FRESHNESS_REGISTRY : "governs"
   FRESHNESS_REGISTRY ||--o{ FRESHNESS_SLA_BREACH : "breaches"
   INDEX_CHUNKS ||--o{ METRICS_REINDEX_LOG : "re-embedded in"
 
   SOURCE_FLIGHT_STATE {
-    text flight_key PK "icao24:first_seen"
-    text icao24
-    text callsign
-    text est_dep_airport
-    text est_arr_airport
-    text status "scheduled|airborne|landed|diverted"
-    timestamptz last_verified_at
+    text flight_key PK "icao24:callsign:first_seen"
+    text status "airborne|on_ground|landed"
+    text near_airport "tracked IATA"
+    text est_dep_airport "ICAO, batch"
+    text est_arr_airport "ICAO, batch"
+    timestamptz first_seen
+    timestamptz last_seen
+    timestamptz updated_at "last business change"
+  }
+  TELEMETRY_FLIGHT_POSITION {
+    text flight_key PK
+    timestamptz last_observed
+    double latitude
+    double longitude
+    double baro_altitude_m
+    boolean on_ground
   }
   SOURCE_FARE {
     text fare_key PK "origin:dest:carrier:cabin"
     numeric fare_usd
     numeric baseline_usd "DB1B median"
+    text baseline_period "e.g. 2025-Q2"
     text source "bts_db1b|drift_sim"
     boolean simulated
-    timestamptz last_verified_at
   }
   SOURCE_AIRPORT {
     text ident PK
     text iata
     text name
-    timestamptz last_verified_at
   }
   INDEX_CHUNKS {
-    text chunk_id PK "table:pk"
+    text chunk_id PK
     text record_key FK
-    text chunk_text
     char content_hash "sha256"
     vector embedding "384-d"
     timestamptz data_as_of
-    timestamptz indexed_at
   }
   FRESHNESS_REGISTRY {
-    text record_key PK
-    text source FK
+    text record_key PK "table:pk or dataset:name"
+    text contract FK
     timestamptz last_verified_at
     timestamptz last_changed_at
+    timestamptz data_as_of
   }
   FRESHNESS_CONTRACT {
-    text source PK
+    text name PK
+    text measure "last_verified_at|data_as_of"
     interval max_age
-    text on_breach
-    int version
+    text on_breach "flag|warn"
   }
   FRESHNESS_SLA_BREACH {
     bigint id PK
