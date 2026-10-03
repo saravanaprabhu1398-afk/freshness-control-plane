@@ -1,0 +1,12 @@
+flowchart LR
+  t0["<b>T0 · baseline</b><br/>index in sync<br/><small>run naive + aware</small><br/><br/><i>expect:</i> both accurate<br/>aware → VERIFIED"]
+  inj["<b>Inject drift</b><br/>fare shocks +<br/>OpenSky delta<br/><br/><small>re-index consumer paused</small>"]
+  t1["<b>T1 · during drift</b><br/>index deliberately stale<br/><small>run naive + aware</small><br/><br/><i>expect:</i> naive → wrong, unflagged<br/>aware → POSSIBLY STALE"]
+  res["<b>Resume consumer</b><br/>selective re-index<br/>catches up"]
+  t2["<b>T2 · recovered</b><br/>index back in sync<br/><small>run naive + aware</small><br/><br/><i>expect:</i> both accurate<br/>aware → VERIFIED"]
+  t0 --> inj --> t1 --> res --> t2
+
+  classDef run fill:#EFF6FF,stroke:#1D4ED8,color:#0F172A
+  classDef act fill:#FFF7ED,stroke:#C2410C,color:#0F172A
+  class t0,t1,t2 run
+  class inj,res act

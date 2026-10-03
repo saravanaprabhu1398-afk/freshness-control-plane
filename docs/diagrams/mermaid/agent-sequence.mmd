@@ -1,0 +1,27 @@
+sequenceDiagram
+  autonumber
+  actor U as Analyst
+  participant A as Agent loop (code)
+  participant L as Claude
+  participant S as search_index
+  participant F as check_freshness
+  participant B as get_baseline
+
+  U->>A: "Current average fare JFK→LAX on DL?"
+  A->>L: question + tool definitions
+  L->>S: search_index(query, k = 8)
+  S-->>L: chunks · data_as_of · source · simulated
+  opt historical context needed
+    L->>B: get_baseline(route)
+    B-->>L: BTS / DB1B aggregates
+  end
+  L->>F: check_freshness(chunk_ids)
+  F-->>L: age · max_age · status per chunk
+  L-->>A: draft answer + citations
+  A->>A: guard: every citation freshness-checked?
+  alt a citation was not checked
+    A->>F: check_freshness(missing ids)
+    F-->>A: status
+  end
+  A->>A: compute label in code (not by the model)
+  A-->>U: answer · label · as_of · simulated-data disclosure

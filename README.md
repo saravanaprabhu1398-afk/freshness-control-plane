@@ -31,24 +31,9 @@ All API usage stays within free-tier limits. No scraping.
 
 ## Architecture
 
-```
- OpenSky / BTS / DB1B ──▶ ingestion ──▶ Postgres (source tables)
-                                              │  Debezium
-                                              ▼
-                                        Kafka change events
-                                     {record_id, ts, delta}
-                                              │
-                         ┌────────────────────┴───────────────────┐
-                         ▼                                        ▼
-                selective re-index                     freshness registry
-           (re-embed changed chunks only)         (last_verified_ts per record)
-                         │                                        │
-                         ▼                                        ▼
-                    vector index ◀──── freshness-aware agent ────▶ SLA contracts
-                                              │
-                                              ▼
-                                eval harness · dashboard
-```
+![Freshness Control Plane system architecture](docs/diagrams/architecture.svg)
+
+The numbered purple path is the change hot path: ① a poller upserts the current state, ② Postgres writes the change to its WAL, ③ Debezium publishes it to Kafka, ④ the re-index consumer picks it up, ⑤ only chunks whose content hash changed are re-embedded, in the same transaction as the freshness registry update, and ⑥ at query time the agent checks the freshness of every chunk it cites. Details: [ARD](docs/ARD.md) · [SDD](docs/SDD.md).
 
 ## Repo layout
 

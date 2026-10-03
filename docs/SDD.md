@@ -33,6 +33,79 @@ dbt/                         staging + marts
 
 ## 2. Data model (Postgres)
 
+```mermaid
+erDiagram
+  SOURCE_FLIGHT_STATE ||--o| INDEX_CHUNKS : "rendered as"
+  SOURCE_FARE ||--o| INDEX_CHUNKS : "rendered as"
+  SOURCE_AIRPORT ||--o| INDEX_CHUNKS : "rendered as"
+  INDEX_CHUNKS ||--|| FRESHNESS_REGISTRY : "record_key"
+  FRESHNESS_CONTRACT ||--o{ FRESHNESS_REGISTRY : "governs (by source)"
+  FRESHNESS_CONTRACT ||--o{ FRESHNESS_SLA_BREACH : "violated in"
+  FRESHNESS_REGISTRY ||--o{ FRESHNESS_SLA_BREACH : "breaches"
+  INDEX_CHUNKS ||--o{ METRICS_REINDEX_LOG : "re-embedded in"
+
+  SOURCE_FLIGHT_STATE {
+    text flight_key PK "icao24:first_seen"
+    text icao24
+    text callsign
+    text est_dep_airport
+    text est_arr_airport
+    text status "scheduled|airborne|landed|diverted"
+    timestamptz last_verified_at
+  }
+  SOURCE_FARE {
+    text fare_key PK "origin:dest:carrier:cabin"
+    numeric fare_usd
+    numeric baseline_usd "DB1B median"
+    text source "bts_db1b|drift_sim"
+    boolean simulated
+    timestamptz last_verified_at
+  }
+  SOURCE_AIRPORT {
+    text ident PK
+    text iata
+    text name
+    timestamptz last_verified_at
+  }
+  INDEX_CHUNKS {
+    text chunk_id PK "table:pk"
+    text record_key FK
+    text chunk_text
+    char content_hash "sha256"
+    vector embedding "384-d"
+    timestamptz data_as_of
+    timestamptz indexed_at
+  }
+  FRESHNESS_REGISTRY {
+    text record_key PK
+    text source FK
+    timestamptz last_verified_at
+    timestamptz last_changed_at
+  }
+  FRESHNESS_CONTRACT {
+    text source PK
+    interval max_age
+    text on_breach
+    int version
+  }
+  FRESHNESS_SLA_BREACH {
+    bigint id PK
+    text record_key FK
+    interval age
+    timestamptz detected_at
+    timestamptz resolved_at
+  }
+  METRICS_REINDEX_LOG {
+    bigint id PK
+    text record_key FK
+    int chunks_reembedded
+    int chunks_skipped_same_hash
+    int e2e_latency_ms
+  }
+```
+
+Keys: `record_key = <table>:<pk>` joins the source rows, chunks, registry and metrics. `source` joins the registry to its contract.
+
 ### 2.1 `source.*`: operational state (watched by CDC)
 
 ```sql
@@ -156,6 +229,40 @@ The connector is `cdc/debezium/source-connector.json`:
 
 ## 4. Selective re-index algorithm
 
+```mermaid
+sequenceDiagram
+  autonumber
+  participant P as Poller (Dagster)
+  participant PG as Postgres source.*
+  participant DBZ as Debezium
+  participant K as Kafka
+  participant C as Re-index consumer
+  participant E as Embedder (bge-small)
+  participant IX as Index + registry
+
+  P->>PG: UPSERT … WHERE row IS DISTINCT FROM
+  alt values unchanged
+    PG-->>P: 0 rows updated (nothing written to WAL)
+    P->>IX: UPDATE registry SET last_verified_at = now()
+    Note over P,IX: Re-verified. No event, no embedding.
+  else values changed
+    PG-->>DBZ: WAL record (pgoutput)
+    DBZ->>K: {op, before, after, ts_ms}
+    K->>C: poll · micro-batch ≤ 64 events / 500 ms
+    C->>C: diff business columns → render chunk → sha256
+    alt content hash unchanged
+      C->>IX: log skip_same_hash
+    else content hash changed
+      C->>E: embed(chunk_text)
+      E-->>C: vector(384)
+      C->>IX: BEGIN · upsert chunk · upsert registry · insert reindex_log · COMMIT
+    end
+    C->>K: commit offset (after DB commit → at-least-once, idempotent)
+  end
+```
+
+Pseudo-code:
+
 ```
 on event e:
   key      = e.source.table + ":" + pk(e.after or e.before)
@@ -220,6 +327,60 @@ on event e:
 
 - Simulated data is always disclosed in the answer footer.
 
+**Query flow:**
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor U as Analyst
+  participant A as Agent loop (code)
+  participant L as Claude
+  participant S as search_index
+  participant F as check_freshness
+  participant B as get_baseline
+
+  U->>A: "Current average fare JFK→LAX on DL?"
+  A->>L: question + tool definitions
+  L->>S: search_index(query, k = 8)
+  S-->>L: chunks · data_as_of · source · simulated
+  opt historical context needed
+    L->>B: get_baseline(route)
+    B-->>L: BTS / DB1B aggregates
+  end
+  L->>F: check_freshness(chunk_ids)
+  F-->>L: age · max_age · status per chunk
+  L-->>A: draft answer + citations
+  A->>A: guard: every citation freshness-checked?
+  alt a citation was not checked
+    A->>F: check_freshness(missing ids)
+    F-->>A: status
+  end
+  A->>A: compute label in code (not by the model)
+  A-->>U: answer · label · as_of · simulated-data disclosure
+```
+
+**Label decision** (pure function in `agent/labels.py`, unit-tested):
+
+```mermaid
+flowchart TD
+  start(["Cited chunks + freshness results"]) --> any{"Any chunk<br/>retrieved?"}
+  any -- no --> ca["CANNOT ANSWER RELIABLY"]
+  any -- yes --> fresh{"All cited chunks<br/>within max_age?"}
+  fresh -- yes --> v["VERIFIED"]
+  fresh -- no --> severe{"All key chunks older<br/>than 2 × max_age?"}
+  severe -- yes --> ca
+  severe -- no --> ps["POSSIBLY STALE<br/><small>as of min(data_as_of)</small>"]
+
+  classDef ok fill:#DCFCE7,stroke:#166534,color:#14532D
+  classDef warn fill:#FEF3C7,stroke:#92400E,color:#78350F
+  classDef bad fill:#FEE2E2,stroke:#991B1B,color:#7F1D1D
+  classDef q fill:#F8FAFC,stroke:#475569,color:#0F172A
+  class v ok
+  class ps warn
+  class ca bad
+  class start,any,fresh,severe q
+```
+
 **Response schema:**
 
 ```json
@@ -231,6 +392,21 @@ on event e:
 **Naive mode** (for the eval): same retrieval, no `check_freshness`, and no label.
 
 ## 7. Evaluation design
+
+```mermaid
+flowchart LR
+  t0["<b>T0 · baseline</b><br/>index in sync<br/><small>run naive + aware</small><br/><br/><i>expect:</i> both accurate<br/>aware → VERIFIED"]
+  inj["<b>Inject drift</b><br/>fare shocks +<br/>OpenSky delta<br/><br/><small>re-index consumer paused</small>"]
+  t1["<b>T1 · during drift</b><br/>index deliberately stale<br/><small>run naive + aware</small><br/><br/><i>expect:</i> naive → wrong, unflagged<br/>aware → POSSIBLY STALE"]
+  res["<b>Resume consumer</b><br/>selective re-index<br/>catches up"]
+  t2["<b>T2 · recovered</b><br/>index back in sync<br/><small>run naive + aware</small><br/><br/><i>expect:</i> both accurate<br/>aware → VERIFIED"]
+  t0 --> inj --> t1 --> res --> t2
+
+  classDef run fill:#EFF6FF,stroke:#1D4ED8,color:#0F172A
+  classDef act fill:#FFF7ED,stroke:#C2410C,color:#0F172A
+  class t0,t1,t2 run
+  class inj,res act
+```
 
 - **Golden set** (`eval/golden/*.yaml`): about 50 questions.
 

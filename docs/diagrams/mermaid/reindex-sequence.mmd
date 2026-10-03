@@ -1,0 +1,29 @@
+sequenceDiagram
+  autonumber
+  participant P as Poller (Dagster)
+  participant PG as Postgres source.*
+  participant DBZ as Debezium
+  participant K as Kafka
+  participant C as Re-index consumer
+  participant E as Embedder (bge-small)
+  participant IX as Index + registry
+
+  P->>PG: UPSERT … WHERE row IS DISTINCT FROM
+  alt values unchanged
+    PG-->>P: 0 rows updated (nothing written to WAL)
+    P->>IX: UPDATE registry SET last_verified_at = now()
+    Note over P,IX: Re-verified. No event, no embedding.
+  else values changed
+    PG-->>DBZ: WAL record (pgoutput)
+    DBZ->>K: {op, before, after, ts_ms}
+    K->>C: poll · micro-batch ≤ 64 events / 500 ms
+    C->>C: diff business columns → render chunk → sha256
+    alt content hash unchanged
+      C->>IX: log skip_same_hash
+    else content hash changed
+      C->>E: embed(chunk_text)
+      E-->>C: vector(384)
+      C->>IX: BEGIN · upsert chunk · upsert registry · insert reindex_log · COMMIT
+    end
+    C->>K: commit offset (after DB commit → at-least-once, idempotent)
+  end
