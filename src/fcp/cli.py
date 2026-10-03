@@ -48,10 +48,12 @@ def _ingest(step: str, months: int | None) -> Any:
 
 
 def _seed(months: int | None) -> None:
+    from fcp.common import migrate
     from fcp.freshness import contracts
     from fcp.transform import dbt
 
     steps: list[tuple[str, Callable[[], Any]]] = [
+        ("db upgrade", migrate.upgrade),
         ("contracts", contracts.sync),
         ("airports", lambda: _ingest("airports", None)),
         ("bts-ontime", lambda: _ingest("bts-ontime", months)),
@@ -136,6 +138,21 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("status", help="show loaded data, freshness and budget")
 
+    dbp = sub.add_parser("db", help="database schema")
+    dbp.add_argument("action", choices=["upgrade"])
+
+    cdc = sub.add_parser("cdc", help="Debezium connector and change events")
+    cdc.add_argument("action", choices=["register", "status", "tail", "stats"])
+    cdc.add_argument("--seconds", type=float, default=60, help="tail/stats: how long to listen")
+    cdc.add_argument("--limit", type=int, help="tail: stop after N events")
+    cdc.add_argument("--table", action="append", help="tail: only this table, e.g. source.fare")
+    cdc.add_argument("--from-beginning", action="store_true", help="tail: replay retained events")
+
+    dr = sub.add_parser("drift", help="fare-drift simulator (SIMULATED data)")
+    dr.add_argument("action", choices=["tick", "shock"])
+    dr.add_argument("--fraction", type=float, default=0.2, help="shock: share of fares to move")
+    dr.add_argument("--multiplier", type=float, default=1.25, help="shock: price multiplier")
+
     args = parser.parse_args(argv)
     configure(args.log_level)
 
@@ -155,7 +172,57 @@ def main(argv: list[str] | None = None) -> int:
         _seed(args.months)
     elif args.cmd == "status":
         _status()
+    elif args.cmd == "db":
+        from fcp.common import migrate
+
+        log.info("db.upgraded", applied=migrate.upgrade())
+    elif args.cmd == "cdc":
+        _cdc(args)
+    elif args.cmd == "drift":
+        from fcp.ingestion.fares import drift
+
+        if args.action == "tick":
+            stats = drift.run_tick()
+        else:
+            stats = drift.run_shock(fraction=args.fraction, multiplier=args.multiplier)
+        log.info(
+            "drift.done",
+            action=args.action,
+            changed=stats.rows_changed,
+            unchanged=stats.rows_unchanged,
+            detail=stats.detail,
+        )
     return 0
+
+
+def _cdc(args: argparse.Namespace) -> None:
+    from fcp.cdc import connect as cdc_connect
+    from fcp.cdc import consumer
+
+    if args.action == "register":
+        state = cdc_connect.register()
+        log.info(
+            "cdc.registered",
+            connector=state["connector"]["state"],
+            tasks=[t["state"] for t in state["tasks"]],
+        )
+    elif args.action == "status":
+        state = cdc_connect.status()
+        print(
+            f"connector: {state['connector']['state']}  tasks: {[t['state'] for t in state.get('tasks', [])]}"
+        )
+    elif args.action == "tail":
+        c = consumer.make_consumer(from_beginning=args.from_beginning)
+        for r in consumer.iter_events(c, seconds=args.seconds, limit=args.limit, tables=args.table):
+            print(consumer.format_event(r), flush=True)
+    else:
+        results = consumer.measure(args.seconds)
+        print(f"{'table':<20} {'op':<3} {'events':>6} {'capture p50/p95 ms':>20} {'delivery p50/p95 ms':>21}")
+        for w in results:
+            print(
+                f"{w.table:<20} {w.op:<3} {w.events:>6} {f'{w.p50_capture_ms}/{w.p95_capture_ms}':>20} "
+                f"{f'{w.p50_delivery_ms}/{w.p95_delivery_ms}':>21}"
+            )
 
 
 if __name__ == "__main__":

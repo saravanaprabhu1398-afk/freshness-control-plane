@@ -1,0 +1,32 @@
+{
+  "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+  "tasks.max": "1",
+
+  "database.hostname": "postgres",
+  "database.port": "5432",
+  "database.dbname": "fcp",
+  "database.user": "fcp_cdc",
+  "database.password": "${env:FCP_CDC_PASSWORD}",
+
+  "plugin.name": "pgoutput",
+  "publication.name": "fcp_source",
+  "publication.autocreate.mode": "disabled",
+  "slot.name": "fcp_source",
+  "table.include.list": "source.flight_state,source.fare,source.airport",
+  "snapshot.mode": "initial",
+
+  "topic.prefix": "fcp",
+  "topic.creation.default.replication.factor": "1",
+  "topic.creation.default.partitions": "3",
+  "topic.creation.default.cleanup.policy": "delete",
+  "topic.creation.default.retention.ms": "604800000",
+
+  "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "key.converter.schemas.enable": "false",
+  "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "value.converter.schemas.enable": "false",
+  "decimal.handling.mode": "string",
+  "tombstones.on.delete": "false",
+
+  "heartbeat.interval.ms": "60000"
+}

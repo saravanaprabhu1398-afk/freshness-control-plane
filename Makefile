@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 export DAGSTER_HOME := $(CURDIR)/.dagster
 
-.PHONY: help install up down seed poll dagster status test test-unit lint typecheck check diagrams
+.PHONY: help install up down cdc seed poll drift tail dagster status test test-unit lint typecheck check diagrams
 
 help:  ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -9,17 +9,27 @@ help:  ## List targets
 install:  ## Install Python 3.12 deps with uv
 	uv sync
 
-up:  ## Start Postgres, Kafka and Debezium Connect; wait until healthy
+up:  ## Start Postgres, Kafka and Debezium Connect; apply database migrations
 	docker compose up -d --wait
+	uv run fcp db upgrade
+
+cdc: up  ## Register (or update) the Debezium connector and wait until it is RUNNING
+	uv run fcp cdc register
 
 down:  ## Stop the stack (data volumes are kept)
 	docker compose down
 
-seed: up  ## Load the real-data baseline: contracts, airports, BTS, DB1B, dbt marts, fares
+seed: cdc  ## Load the real-data baseline: contracts, airports, BTS, DB1B, dbt marts, fares
 	uv run fcp seed
 
 poll: up  ## Run one live OpenSky poll
 	uv run fcp ingest opensky-states
+
+drift: up  ## Apply the current fare-drift tick (SIMULATED; idempotent per tick)
+	uv run fcp drift tick
+
+tail: ## Watch change events (record id, commit time, delta) for 60 s
+	uv run fcp cdc tail --seconds 60
 
 dagster: up  ## Start Dagster (UI on http://localhost:3000) with schedules
 	@mkdir -p $(DAGSTER_HOME)
@@ -28,7 +38,7 @@ dagster: up  ## Start Dagster (UI on http://localhost:3000) with schedules
 status:  ## Show loaded data, freshness and API budget
 	uv run fcp status
 
-test: up  ## All tests (unit + integration against local Postgres)
+test: cdc  ## All tests (unit + integration against the local stack, including CDC end to end)
 	uv run pytest
 
 test-unit:  ## Unit tests only (no services needed)

@@ -1,0 +1,47 @@
+{
+  "key": {
+    "fare_key": "ATL:DEN:UA:ALL"
+  },
+  "topic": "fcp.source.fare",
+  "value": {
+    "after": {
+      "baseline_period": "2025-Q2",
+      "baseline_usd": "226.75",
+      "cabin": "ALL",
+      "carrier": "UA",
+      "dest": "DEN",
+      "effective_at": "2025-06-30T23:59:59.999999Z",
+      "fare_key": "ATL:DEN:UA:ALL",
+      "fare_usd": "226.75",
+      "origin": "ATL",
+      "sample_size": 736,
+      "simulated": false,
+      "source": "bts_db1b",
+      "updated_at": "2026-10-02T13:48:26.088139Z"
+    },
+    "before": null,
+    "op": "r",
+    "source": {
+      "connector": "postgresql",
+      "db": "fcp",
+      "lsn": 36669528,
+      "name": "fcp",
+      "origin": null,
+      "origin_lsn": null,
+      "schema": "source",
+      "sequence": "[null,\"36669528\"]",
+      "snapshot": "true",
+      "table": "fare",
+      "ts_ms": 1791055583349,
+      "ts_ns": 1791055583349805000,
+      "ts_us": 1791055583349805,
+      "txId": 930,
+      "version": "3.5.2.Final",
+      "xmin": null
+    },
+    "transaction": null,
+    "ts_ms": 1791055583472,
+    "ts_ns": 1791055583472919713,
+    "ts_us": 1791055583472919
+  }
+}

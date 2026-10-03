@@ -56,13 +56,19 @@ make install
 make seed
 ```
 
-`make seed` starts Postgres, Kafka and Debezium, then loads the real baseline: airports, 6 months of BTS on-time data, the newest DB1B quarter, the dbt marts and the fare seed.
+`make seed` starts Postgres, Kafka and Debezium, applies migrations, registers the CDC connector, then loads the real baseline: airports, 6 months of BTS on-time data, the newest DB1B quarter, the dbt marts and the fare seed.
 
 ```bash
 make poll
 ```
 
 `make poll` runs one live OpenSky poll.
+
+```bash
+make tail
+```
+
+`make tail` shows change events as they stream: record ID, commit time, the exact delta, and the latency from commit to consumer. Run `make poll` or `make drift` in another terminal to create some.
 
 ```bash
 make status
@@ -86,9 +92,10 @@ Run `make check` for lint, `mypy --strict`, and the unit and integration tests (
 | `src/fcp/common/` | Change-aware upserts, freshness registry, API credit budget, settings, logging |
 | `src/fcp/orchestration/` | Dagster assets, jobs and schedules |
 | `dbt/` | Staging and marts over Iceberg (dbt-duckdb), with data tests |
-| `db/init/` | Postgres schema: `source`, `telemetry`, `freshness`, `index`, `metrics`, `ops` |
+| `db/migrations/` | Ordered SQL migrations for `source`, `telemetry`, `freshness`, `index`, `metrics`, `ops` |
 | `contracts/` | Freshness SLA data contracts |
-| `cdc/` | Debezium connector configs (Phase 2) |
+| `cdc/` | Debezium connector config |
+| `src/fcp/cdc/` | Connector registration and self-healing, the change-event parser, `cdc tail` and `cdc stats` |
 | `eval/` | Golden question set (Phase 6) |
 | `tests/` | Unit tests, and integration tests against the local Postgres |
 | `docs/` | PRD, ARD, SDD, data sources, diagrams |
@@ -96,7 +103,7 @@ Run `make check` for lint, `mypy --strict`, and the unit and integration tests (
 ## Roadmap
 
 - [x] **Phase 1:** Data sourcing and baseline
-- [ ] **Phase 2:** CDC change detection (Debezium + Kafka)
+- [x] **Phase 2:** CDC change detection (Debezium + Kafka)
 - [ ] **Phase 3:** Selective re-indexing with cost/time-saved tracking
 - [ ] **Phase 4:** Freshness SLA as data contracts
 - [ ] **Phase 5:** Freshness-aware agent
@@ -114,6 +121,16 @@ Run `make check` for lint, `mypy --strict`, and the unit and integration tests (
 | Idempotent reloads | Re-running the Dagster baseline job: 873 of 873 airports and 235 of 235 fares unchanged, with no rows rewritten |
 | Live polling | 4,521 aircraft in the bounding box, 568 tracked at the hubs, 4 OpenSky credits per poll |
 | Change selectivity | On a second poll 3 minutes later, **77% of tracked flights were unchanged and wrote nothing** (448 of 583). Only 36 real status changes and 99 new flights reached the change log, which is what Phase 3's selective re-index will build on |
+
+**Phase 2, measured on 2026-10-03**
+
+| What | Result |
+|---|---|
+| Initial snapshot | 667 flights, 235 fares and 873 airports in Kafka, exactly matching the tables |
+| Events carry what the brief asks for | Record ID, commit time and an exact delta, e.g. `fare_usd: 98.00 -> 64.00, simulated: False -> True` |
+| Change selectivity | A live poll a few minutes after the previous one: 666 of 768 flights (87%) unchanged and silent. A drift tick: 225 of 235 fares (96%) unchanged |
+| Latency, from a short sample (2 commits, 112 events) | Commit → Debezium p95 177–241 ms; commit → our consumer p95 587–694 ms |
+| Resilience | Kafka data and the connector survive a forced container recreate; a deleted connector is re-registered by the Dagster sensor and resumes from saved offsets without re-snapshotting |
 
 ## Success criteria
 

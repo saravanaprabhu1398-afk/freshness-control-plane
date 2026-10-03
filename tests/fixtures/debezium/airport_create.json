@@ -1,0 +1,45 @@
+{
+  "key": {
+    "ident": "TEST-FIXTURE"
+  },
+  "topic": "fcp.source.airport",
+  "value": {
+    "after": {
+      "elevation_ft": null,
+      "iata": "ZZZ",
+      "ident": "TEST-FIXTURE",
+      "latitude": 1.5,
+      "longitude": 2.5,
+      "municipality": null,
+      "name": "Fixture Field",
+      "region": null,
+      "source": "ourairports",
+      "type": "small_airport",
+      "updated_at": "2026-10-03T19:29:09.773111Z"
+    },
+    "before": null,
+    "op": "c",
+    "source": {
+      "connector": "postgresql",
+      "db": "fcp",
+      "lsn": 36761184,
+      "name": "fcp",
+      "origin": null,
+      "origin_lsn": null,
+      "schema": "source",
+      "sequence": "[null,\"36761184\"]",
+      "snapshot": "false",
+      "table": "airport",
+      "ts_ms": 1791055749774,
+      "ts_ns": 1791055749774057000,
+      "ts_us": 1791055749774057,
+      "txId": 932,
+      "version": "3.5.2.Final",
+      "xmin": null
+    },
+    "transaction": null,
+    "ts_ms": 1791055750073,
+    "ts_ns": 1791055750073127596,
+    "ts_us": 1791055750073127
+  }
+}

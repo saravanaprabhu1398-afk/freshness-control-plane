@@ -71,8 +71,8 @@
 <rect x="325" y="280" width="240" height="100" rx="10" fill="#FFFFFF" stroke="#4338CA" stroke-width="1.5" filter="url(#shadow)"/>
 <rect x="325" y="290" width="4" height="80" rx="2" fill="#4338CA"/>
 <text x="341" y="304" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="650" fill="#0F172A" text-anchor="start" >Fare-drift simulator</text>
-<text x="341" y="324" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#475569" text-anchor="start" >Seasonality × days-to-departure</text>
-<text x="341" y="341" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#475569" text-anchor="start" >+ Poisson price shocks</text>
+<text x="341" y="324" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#475569" text-anchor="start" >Mean-reverting reprices, p=0.04/tick</text>
+<text x="341" y="341" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#475569" text-anchor="start" >+ rare ±15–40% shocks · idempotent</text>
 <rect x="341" y="354" width="67" height="18" rx="9" fill="#FEF3C7"/>
 <text x="374.7" y="366.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="9.5" font-weight="700" fill="#92400E" text-anchor="middle" letter-spacing="0.06em">SIMULATED</text>
 <rect x="325" y="400" width="240" height="100" rx="10" fill="#FFFFFF" stroke="#4338CA" stroke-width="1.5" filter="url(#shadow)"/>
@@ -201,7 +201,7 @@
 <circle cx="592" cy="180" r="11" fill="#7C3AED" stroke="#FFFFFF" stroke-width="2"/>
 <text x="592" y="184.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#FFFFFF" text-anchor="middle" >1</text>
 <path d="M565,320 L620,320" fill="none" stroke="#64748B" stroke-width="1.6" stroke-linejoin="round" marker-end="url(#arrow)"/>
-<text x="592" y="312" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="500" fill="#475569" text-anchor="middle" paint-order="stroke" stroke="#FFFFFF" stroke-width="5" stroke-linejoin="round">upsert</text>
+<text x="592" y="312" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="500" fill="#475569" text-anchor="middle" paint-order="stroke" stroke="#FFFFFF" stroke-width="5" stroke-linejoin="round">update</text>
 <path d="M565,450 L620,450" fill="none" stroke="#64748B" stroke-width="1.6" stroke-linejoin="round" marker-end="url(#arrow)"/>
 <text x="592" y="442" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="500" fill="#475569" text-anchor="middle" paint-order="stroke" stroke="#FFFFFF" stroke-width="5" stroke-linejoin="round">append</text>
 <path d="M765,500 L765,535" fill="none" stroke="#64748B" stroke-width="1.6" stroke-linejoin="round" marker-end="url(#arrow)"/>

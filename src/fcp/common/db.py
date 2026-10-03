@@ -91,6 +91,50 @@ def upsert_changed(
     return result
 
 
+def update_changed(
+    conn: psycopg.Connection[Any],
+    table: str,
+    rows: Sequence[Row],
+    *,
+    key: str,
+    business_cols: Sequence[str],
+) -> UpsertResult:
+    """Update existing rows only where a business column actually changes (never inserts).
+
+    Same guarantee as `upsert_changed`: an unchanged row is not written, so it produces no WAL
+    record and no CDC event. Use it when the caller only knows the changing columns (an
+    INSERT ... ON CONFLICT would fail NOT NULL checks on the columns it does not supply).
+    Keys that do not exist are reported as unchanged.
+    """
+    result = UpsertResult()
+    if not rows:
+        return result
+    schema, name = table.split(".")
+    stmt = sql.SQL(
+        "update {table} as t set {sets}, updated_at = now() "
+        "where t.{key} = {key_ph} and ({old}) is distinct from ({new}) "
+        "returning t.{key} as key"
+    ).format(
+        table=sql.Identifier(schema, name),
+        sets=sql.SQL(", ").join(
+            sql.SQL("{} = {}").format(sql.Identifier(c), sql.Placeholder(c)) for c in business_cols
+        ),
+        key=sql.Identifier(key),
+        key_ph=sql.Placeholder(key),
+        old=sql.SQL(", ").join(sql.SQL("t.{}").format(sql.Identifier(c)) for c in business_cols),
+        new=sql.SQL(", ").join(sql.Placeholder(c) for c in business_cols),
+    )
+    with conn.cursor() as cur:
+        cur.executemany(stmt, rows, returning=True)
+        while True:
+            for rec in cur.fetchall():
+                result.updated.add(rec["key"] if isinstance(rec, Mapping) else rec[0])
+            if not cur.nextset():
+                break
+    result.unchanged = {r[key] for r in rows} - result.updated
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class FreshnessEntry:
     record_key: str
