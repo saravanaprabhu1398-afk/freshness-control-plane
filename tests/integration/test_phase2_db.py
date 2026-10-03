@@ -36,6 +36,14 @@ def test_update_changed_writes_only_real_changes(db: psycopg.Connection[Any]) ->
 
 
 def test_drift_tick_is_applied_once(db: psycopg.Connection[Any]) -> None:
+    # Own fares, so the test does not depend on a seeded database (CI starts empty).
+    with db.cursor() as cur:
+        cur.executemany(
+            "insert into source.fare (fare_key, origin, dest, carrier, cabin, fare_usd, baseline_usd, "
+            "baseline_period, sample_size, effective_at, source, simulated) values "
+            "(%s, 'TST', 'TSU', 'ZZ', 'ALL', 300, 300, '2025-Q2', 100, now(), 'bts_db1b', false)",
+            [(f"TEST:{i:03d}",) for i in range(100)],
+        )
     tick = 10**12  # far outside real tick indexes; rolled back with the transaction anyway
     now = datetime.now(UTC)
     params = DriftParams(p_reprice=0.5)

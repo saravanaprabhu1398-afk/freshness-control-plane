@@ -209,7 +209,7 @@ The connector config is [`cdc/debezium/fcp-source.json`](../cdc/debezium/fcp-sou
 | `snapshot.mode` | `initial` | Existing rows arrive once as `op = r`, then streaming starts |
 | Converters | JSON, `schemas.enable = false` | Small, readable messages; the schema is the Postgres table |
 | `decimal.handling.mode` | `string` | `fare_usd` arrives as `"226.75"`, never as a rounded float |
-| Topics | `fcp.source.<table>`, 3 partitions, 7-day retention | Keyed by primary key, so all changes to one record stay in order |
+| Topics | `fcp.source.<table>`, 3 partitions, 7-day retention, **created by `fcp cdc register`** | Keyed by primary key, so all changes to one record stay in order. Creating them up front means a consumer started on an empty database cannot miss the first events while waiting for the topic to appear (found by CI, which starts empty) |
 | Unwrap SMT | Not applied | The consumer needs both `before` and `after` |
 
 `REPLICA IDENTITY FULL` on the source tables makes the `before` image complete.

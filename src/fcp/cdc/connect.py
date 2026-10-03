@@ -7,7 +7,12 @@ import time
 from typing import Any
 
 import httpx
+from confluent_kafka import KafkaError, KafkaException
 
+# NewTopic is documented under confluent_kafka.admin but its stubs do not re-export it.
+from confluent_kafka.admin import AdminClient, NewTopic  # type: ignore[attr-defined]
+
+from fcp.cdc.events import topics
 from fcp.common.logging import get_logger
 from fcp.common.settings import REPO_ROOT, get_settings
 
@@ -51,8 +56,44 @@ def ensure_running(*, wait_s: float = 60) -> dict[str, Any]:
     return register(wait_s=wait_s)
 
 
+def ensure_topics() -> list[str]:
+    """Create the source topics up front, with the settings from the connector config.
+
+    Debezium would create them on the first change, but on an empty database that means a
+    consumer started before any change subscribes to topics that do not exist yet and can miss
+    the first events until its metadata refreshes. Explicit topics also make their settings
+    deterministic. Returns the topics created now (existing ones are left as they are).
+    """
+    cfg = connector_config()
+    admin = AdminClient({"bootstrap.servers": get_settings().kafka_bootstrap})
+    wanted = [
+        NewTopic(
+            t,
+            num_partitions=int(cfg["topic.creation.default.partitions"]),
+            replication_factor=int(cfg["topic.creation.default.replication.factor"]),
+            config={
+                "cleanup.policy": cfg["topic.creation.default.cleanup.policy"],
+                "retention.ms": cfg["topic.creation.default.retention.ms"],
+            },
+        )
+        for t in topics(cfg["topic.prefix"])
+    ]
+    created = []
+    for name, future in admin.create_topics(wanted, request_timeout=30).items():
+        try:
+            future.result()
+            created.append(name)
+        except KafkaException as exc:
+            if exc.args[0].code() != KafkaError.TOPIC_ALREADY_EXISTS:
+                raise
+    if created:
+        log.info("cdc.topics.created", topics=created)
+    return created
+
+
 def register(*, wait_s: float = 60) -> dict[str, Any]:
-    """Create or update the connector (PUT is idempotent), then wait until it is RUNNING."""
+    """Create topics, create or update the connector (PUT is idempotent), wait until RUNNING."""
+    ensure_topics()
     with _client() as c:
         response = c.put(f"/connectors/{CONNECTOR_NAME}/config", json=connector_config())
         response.raise_for_status()

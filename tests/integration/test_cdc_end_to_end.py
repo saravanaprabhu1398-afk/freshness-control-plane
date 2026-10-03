@@ -27,11 +27,10 @@ def _connector_running() -> None:
 
 def test_insert_update_delete_flow_through_debezium() -> None:
     ident = f"T-{uuid.uuid4().hex[:8]}"
-    consumer = make_consumer()
+    # Read from the beginning and filter on our unique key: robust whether or not the consumer
+    # has been assigned partitions by the time we write.
+    consumer = make_consumer(from_beginning=True)
     consumer.subscribe(topics())
-    deadline = time.monotonic() + 30
-    while not consumer.assignment() and time.monotonic() < deadline:  # wait for partitions
-        consumer.poll(0.5)
 
     with connect(autocommit=True) as conn:
         conn.execute(
