@@ -71,6 +71,18 @@ make tail
 `make tail` shows change events as they stream: record ID, commit time, the exact delta, and the latency from commit to consumer. Run `make poll` or `make drift` in another terminal to create some.
 
 ```bash
+make reindex
+```
+
+`make reindex` runs the selective re-index consumer in the foreground. `make up-app` runs it as a container instead, with a health check.
+
+```bash
+make savings
+```
+
+`make savings` shows index coverage (missing, behind, orphaned), consumer lag, and the savings against three naive baselines.
+
+```bash
 make status
 ```
 
@@ -95,6 +107,7 @@ Run `make check` for lint, `mypy --strict`, and the unit and integration tests (
 | `db/migrations/` | Ordered SQL migrations for `source`, `telemetry`, `freshness`, `index`, `metrics`, `ops` |
 | `contracts/` | Freshness SLA data contracts |
 | `cdc/` | Debezium connector config |
+| `src/fcp/reindex/` | Selective re-index consumer, chunker, embedder, full-rebuild benchmark, savings report |
 | `src/fcp/cdc/` | Connector registration and self-healing, the change-event parser, `cdc tail` and `cdc stats` |
 | `eval/` | Golden question set (Phase 6) |
 | `tests/` | Unit tests, and integration tests against the local Postgres |
@@ -104,7 +117,7 @@ Run `make check` for lint, `mypy --strict`, and the unit and integration tests (
 
 - [x] **Phase 1:** Data sourcing and baseline
 - [x] **Phase 2:** CDC change detection (Debezium + Kafka)
-- [ ] **Phase 3:** Selective re-indexing with cost/time-saved tracking
+- [x] **Phase 3:** Selective re-indexing with cost/time-saved tracking
 - [ ] **Phase 4:** Freshness SLA as data contracts
 - [ ] **Phase 5:** Freshness-aware agent
 - [ ] **Phase 6:** Evaluation under drift
@@ -131,6 +144,18 @@ Run `make check` for lint, `mypy --strict`, and the unit and integration tests (
 | Change selectivity | A live poll a few minutes after the previous one: 666 of 768 flights (87%) unchanged and silent. A drift tick: 225 of 235 fares (96%) unchanged |
 | Latency, from a short sample (2 commits, 112 events) | Commit → Debezium p95 177–241 ms; commit → our consumer p95 587–694 ms |
 | Resilience | Kafka data and the connector survive a forced container recreate; a deleted connector is re-registered by the Dagster sensor and resumes from saved offsets without re-snapshotting |
+
+**Phase 3, measured on 2026-10-06** (a 17-minute window: 4 live polls and 1 drift tick, real model)
+
+| What | Result |
+|---|---|
+| Full re-embed (the naive baseline) | 2,625 chunks, 127,544 tokens, 15.4 s with `BAAI/bge-small-en-v1.5` |
+| Selective re-embed in the window | 291 chunks, 14,713 tokens: exactly the 291 changes the ingestion jobs reported |
+| Saving vs re-embedding every row the refreshes touched | **73.1%** (291 of 1,081) |
+| Saving vs re-embedding the full corpus on every refresh | **97.7%** of tokens (14,713 vs 637,720, about 43x fewer) |
+| Commit → updated index | p50 1.3 s, p95 1.7 s, max 1.9 s (target: under 60 s) |
+| At-least-once replay | Rebuilding from a topic holding a duplicate snapshot: 2,625 embedded, **2,625 replayed events skipped** by content hash |
+| Index vs source | 0 missing, 0 behind, 0 orphaned chunks; consumer lag 0 |
 
 ## Success criteria
 

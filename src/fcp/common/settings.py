@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     # Fare-drift simulator (Phase 2, simulated data). Same seed + same tick = same prices.
     drift_seed: int = 20261002
     drift_tick_minutes: int = Field(default=15, ge=1, le=1440)
+    # Long-running services touch this file every loop; container health checks read its age.
+    heartbeat_file: Path | None = None
 
     # OpenSky (ADR-003). Credentials are optional; see module docstring.
     opensky_client_id: str | None = Field(default=None, validation_alias="OPENSKY_CLIENT_ID")

@@ -20,7 +20,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv sync --frozen
+      - run: uv sync --frozen --all-extras
       - run: uv run ruff check src tests
       - run: uv run ruff format --check src tests
       - run: uv run mypy
@@ -35,15 +35,30 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv sync --frozen
+      - run: uv sync --frozen --all-extras
       - name: Start stack
         run: docker compose up -d --wait
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: data/models
+          key: embed-model-bge-small-en-v1.5-fastembed-${{ hashFiles('uv.lock') }}
       - name: Migrate and register the Debezium connector
         run: |
           uv run fcp db upgrade
           uv run fcp cdc register
-      - name: Tests (unit + integration + CDC end to end)
+      - name: Tests (unit + integration + CDC and re-index end to end + real model)
         run: uv run pytest --cov=fcp --cov-report=term-missing
       - name: Stack logs on failure
         if: failure()
         run: docker compose logs --tail 200
+
+  image:
+    # Keeps the service image buildable; nothing is pushed anywhere.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the re-index service image
+        run: DOCKER_BUILDKIT=1 docker build --tag fcp-reindex:ci .
+      - name: Smoke-test the CLI inside the image
+        run: docker run --rm fcp-reindex:ci --help

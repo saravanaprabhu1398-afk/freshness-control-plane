@@ -90,6 +90,37 @@ services:
       timeout: 5s
       retries: 18
 
+  reindex:
+    # Selective re-index consumer (Phase 3). Started by `make up-app`; the core stack does not need it.
+    build: .
+    profiles: ["app"]
+    command: ["reindex", "run"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      FCP_PG_HOST: postgres
+      FCP_PG_USER: ${FCP_PG_USER:-fcp}
+      FCP_PG_PASSWORD: ${FCP_PG_PASSWORD:-fcp_local_only}
+      FCP_PG_DB: ${FCP_PG_DB:-fcp}
+      FCP_KAFKA_BOOTSTRAP: kafka:19092
+      FCP_CONNECT_URL: http://connect:8083
+    volumes:
+      - models:/data/models
+    healthcheck:
+      # Healthy only while the consume loop is turning (heartbeat touched within 60 s). The first
+      # start downloads the model (~64 MB), hence the generous start period.
+      test: ["CMD-SHELL", "test -n \"$$(find /tmp/fcp-reindex.heartbeat -mmin -1 2>/dev/null)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    restart: unless-stopped
+    stop_grace_period: 30s
+
 volumes:
   pgdata:
   kafkadata:
+  models:

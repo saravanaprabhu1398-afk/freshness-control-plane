@@ -5,22 +5,30 @@ description = "Detects stale aviation data and stops a RAG agent from presenting
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
+# Core: what the long-running services need (CDC tooling, re-index consumer, CLI).
 dependencies = [
     "confluent-kafka>=2.15.1",
+    "fastembed>=0.8.1",
+    "httpx>=0.28.1",
+    "psycopg[binary,pool]>=3.3.6",
+    "pydantic-settings>=2.15.0",
+    "pyyaml>=6.0.3",
+    "structlog>=26.1.0",
+    "tenacity>=9.1.4",
+]
+
+[project.optional-dependencies]
+# Batch ingestion, the Iceberg lake, dbt and Dagster. Installed for development and CI
+# (`uv sync --all-extras`), left out of the service image.
+pipeline = [
     "dagster>=1.13.25",
     "dagster-dbt>=0.29.25",
     "dagster-webserver>=1.13.25",
     "dbt-core>=1.12.5",
     "dbt-duckdb>=1.11.0",
     "duckdb>=1.5.6",
-    "httpx>=0.28.1",
-    "psycopg[binary,pool]>=3.3.6",
     "pyarrow>=25.0.1",
-    "pydantic-settings>=2.15.0",
     "pyiceberg[pyarrow,sql-sqlite]>=0.12.0",
-    "pyyaml>=6.0.3",
-    "structlog>=26.1.0",
-    "tenacity>=9.1.4",
 ]
 
 [dependency-groups]
@@ -78,4 +86,5 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = [
     "integration: needs the local Postgres from docker compose (make up)",
+    "model: downloads and runs the real embedding model (BAAI/bge-small-en-v1.5, ~64 MB, cached in data/models)",
 ]
