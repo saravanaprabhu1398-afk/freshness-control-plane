@@ -22,7 +22,7 @@ services:
       - "127.0.0.1:${FCP_PG_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./db/init:/docker-entrypoint-initdb.d:ro
+    # Schema comes from db/migrations via `fcp db upgrade` (run by `make up`).
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -36,7 +36,7 @@ services:
       CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk  # any 22-char base64 UUID; fixed for a reproducible local cluster
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_LISTENERS: INTERNAL://kafka:19092,CONTROLLER://kafka:9093,EXTERNAL://0.0.0.0:9092
-      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,EXTERNAL://localhost:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,EXTERNAL://127.0.0.1:9092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
@@ -45,6 +45,9 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # The image defaults to /tmp/kraft-combined-logs; keep data on the named volume instead,
+      # otherwise recreating the container silently drops every topic and Connect's offsets.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
     ports:
       - "127.0.0.1:9092:9092"
     volumes:
@@ -71,6 +74,14 @@ services:
       CONFIG_STORAGE_REPLICATION_FACTOR: 1
       OFFSET_STORAGE_REPLICATION_FACTOR: 1
       STATUS_STORAGE_REPLICATION_FACTOR: 1
+      # Commit source offsets every 10 s (default 60 s) so a restart replays at most ~10 s of
+      # changes. Replays are still possible (at-least-once); consumers are idempotent.
+      OFFSET_FLUSH_INTERVAL_MS: 10000
+      # Secrets are resolved inside the worker (${env:...} in connector config), so they never
+      # appear in the connector config stored in Kafka or returned by the REST API.
+      CONNECT_CONFIG_PROVIDERS: env
+      CONNECT_CONFIG_PROVIDERS_ENV_CLASS: org.apache.kafka.common.config.provider.EnvVarConfigProvider
+      FCP_CDC_PASSWORD: ${FCP_CDC_PASSWORD:-fcp_cdc_local_only}
     ports:
       - "127.0.0.1:8083:8083"
     healthcheck:

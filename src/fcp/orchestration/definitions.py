@@ -8,6 +8,7 @@ what the free tier allows.
 """
 
 import os
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -118,6 +119,48 @@ def opensky_flights() -> dg.MaterializeResult[Any]:
     return _result(poller.poll_flights())
 
 
+@dg.asset(
+    group_name="simulation",
+    key=["sim", "fare_drift"],
+    deps=[dg.AssetKey(["source", "fare"])],
+    description="SIMULATED fare changes on top of the DB1B baseline (idempotent per 15-minute tick).",
+)
+def fare_drift() -> dg.MaterializeResult[Any]:
+    from fcp.ingestion.fares import drift
+
+    return _result(drift.run_tick())
+
+
+# ----------------------------------------------------------------------------- CDC health
+
+
+@dg.op(description="Register the Debezium connector or restart its failed tasks.")
+def ensure_cdc_connector(context: dg.OpExecutionContext) -> None:
+    from fcp.cdc import connect as cdc_connect
+
+    state = cdc_connect.ensure_running()
+    context.log.info(f"connector {state['connector']['state']}, tasks {[t['state'] for t in state['tasks']]}")
+
+
+@dg.job(description="Self-healing for the Debezium source connector.")
+def cdc_heal() -> None:
+    ensure_cdc_connector()
+
+
+@dg.sensor(job=cdc_heal, minimum_interval_seconds=60, default_status=dg.DefaultSensorStatus.RUNNING)
+def cdc_connector_health(context: dg.SensorEvaluationContext) -> dg.SensorResult | dg.SkipReason:
+    from fcp.cdc import connect as cdc_connect
+
+    try:
+        state = cdc_connect.status()
+    except Exception as exc:  # Connect itself is down: nothing to heal from here
+        return dg.SkipReason(f"Kafka Connect unreachable: {exc}")
+    if cdc_connect.is_healthy(state):
+        return dg.SkipReason("connector RUNNING")
+    # One heal run per minute at most: the run key changes every minute.
+    return dg.SensorResult(run_requests=[dg.RunRequest(run_key=f"heal-{int(time.time() // 60)}")])
+
+
 # ----------------------------------------------------------------------------- jobs & schedules
 
 baseline_job = dg.define_asset_job(
@@ -128,6 +171,7 @@ baseline_job = dg.define_asset_job(
 )
 live_states_job = dg.define_asset_job("live_states", selection=[opensky_states])
 flights_job = dg.define_asset_job("opensky_flights", selection=[opensky_flights])
+drift_job = dg.define_asset_job("fare_drift", selection=[fare_drift])
 
 STATES_CRON = "*/5 * * * *" if settings.opensky_authenticated else "*/20 * * * *"
 
@@ -141,11 +185,14 @@ defs = dg.Definitions(
         fare_baseline,
         opensky_states,
         opensky_flights,
+        fare_drift,
     ],
-    jobs=[baseline_job, live_states_job, flights_job],
+    jobs=[baseline_job, live_states_job, flights_job, drift_job, cdc_heal],
+    sensors=[cdc_connector_health],
     schedules=[
         dg.ScheduleDefinition(job=live_states_job, cron_schedule=STATES_CRON, execution_timezone="UTC"),
         dg.ScheduleDefinition(job=flights_job, cron_schedule="0 6 * * *", execution_timezone="UTC"),
+        dg.ScheduleDefinition(job=drift_job, cron_schedule="*/15 * * * *", execution_timezone="UTC"),
         # BTS publishes monthly; checking weekly picks up a new month within days at no API cost.
         dg.ScheduleDefinition(job=baseline_job, cron_schedule="0 3 * * 1", execution_timezone="UTC"),
     ],

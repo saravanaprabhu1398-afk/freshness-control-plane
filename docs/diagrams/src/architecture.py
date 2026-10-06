@@ -137,7 +137,7 @@ text(155, 630, "OpenSky: OAuth2, ≤80% daily credits", 11.5, 500, MUTED, "middl
 
 # Ingestion
 node(325, 150, 240, 110, "Live pollers", ["OpenSky every 5 min · OAuth2", "OurAirports weekly", "Shared rate limiter + budget"], "ingest")
-node(325, 280, 240, 100, "Fare-drift simulator", ["Seasonality × days-to-departure", "+ Poisson price shocks"], "ingest", ["SIMULATED"])
+node(325, 280, 240, 100, "Fare-drift simulator", ["Mean-reverting reprices, p=0.04/tick", "+ rare ±15–40% shocks · idempotent"], "ingest", ["SIMULATED"])
 node(325, 400, 240, 100, "Batch loaders", ["BTS On-Time (monthly)", "DB1B (quarterly)"], "ingest")
 node(325, 520, 240, 80, "Record / replay", ["Offline demos & CI fixtures"], "ingest", dashed=True)
 
@@ -187,7 +187,7 @@ edge([(270, 535), (298, 535), (298, 470), (325, 470)])
 # ingestion → storage
 edge([(565, 195), (620, 195)], hot=True)
 step(592, 180, 1)
-edge([(565, 320), (620, 320)], "upsert", (592, 312))
+edge([(565, 320), (620, 320)], "update", (592, 312))
 edge([(565, 450), (620, 450)], "append", (592, 442))
 edge([(765, 500), (765, 535)])
 edge([(890, 580), (912, 580), (912, 300), (890, 300)])

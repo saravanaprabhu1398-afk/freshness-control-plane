@@ -1,5 +1,5 @@
 -- Freshness Control Plane: database schema.
--- Runs once, on first start of the postgres container (docker-entrypoint-initdb.d).
+-- Applied by `fcp db upgrade` (src/fcp/common/migrate.py).
 -- Design: docs/SDD.md §2.
 
 create extension if not exists vector;

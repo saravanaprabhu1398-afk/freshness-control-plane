@@ -26,24 +26,24 @@ jobs:
       - run: uv run mypy
 
   test:
+    # Runs the same docker compose stack as local development (Postgres with logical
+    # replication, Kafka, Debezium Connect), so the CDC end-to-end test runs in CI too.
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector:0.8.2-pg16
-        env:
-          POSTGRES_USER: fcp
-          POSTGRES_PASSWORD: fcp_local_only
-          POSTGRES_DB: fcp
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U fcp -d fcp" --health-interval 5s --health-timeout 5s --health-retries 20
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
       - run: uv sync --frozen
-      - name: Apply schema
-        run: psql "postgresql://fcp:fcp_local_only@localhost:5432/fcp" -v ON_ERROR_STOP=1 -f db/init/01_schema.sql
-      - name: Tests (unit + integration)
+      - name: Start stack
+        run: docker compose up -d --wait
+      - name: Migrate and register the Debezium connector
+        run: |
+          uv run fcp db upgrade
+          uv run fcp cdc register
+      - name: Tests (unit + integration + CDC end to end)
         run: uv run pytest --cov=fcp --cov-report=term-missing
+      - name: Stack logs on failure
+        if: failure()
+        run: docker compose logs --tail 200

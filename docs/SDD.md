@@ -24,15 +24,20 @@ src/fcp/
     bts/db1b.py                quarterly CSV -> Iceberg raw.db1b_market
     ourairports.py             -> source.airport
     fares/baseline.py          dbt mart_fare_baseline -> source.fare
+    fares/drift.py             SIMULATED fare drift (idempotent ticks)
     lake.py                    PyIceberg SQL catalog, idempotent partition replace
+  cdc/connect.py               Debezium connector: register, status, self-heal
+  cdc/events.py                Debezium message -> ChangeEvent (record id, commit time, delta)
+  cdc/consumer.py              Kafka consumption, `cdc tail`, `cdc stats`
+  common/migrate.py            ordered SQL migrations (db/migrations)
   transform/dbt.py             runs dbt against the same catalog
   freshness/contracts.py       YAML -> freshness.contract
   orchestration/definitions.py Dagster assets, jobs, schedules
-  (Phase 2+: cdc/, reindex/, agent/, eval/, dashboard/)
+  (Phase 3+: reindex/, agent/, eval/, dashboard/)
 dbt/                           staging + marts over Iceberg (dbt-duckdb iceberg plugin)
-db/init/01_schema.sql          every Postgres schema (runs on first container start)
+db/migrations/NNNN_*.sql       Postgres schema, applied in order by `fcp db upgrade`
 contracts/freshness_sla.yaml   freshness SLAs
-cdc/debezium/                  connector config (Phase 2)
+cdc/debezium/fcp-source.json   Debezium connector config
 eval/golden/                   golden questions (Phase 6)
 tests/unit, tests/integration
 ```
@@ -123,7 +128,7 @@ Keys: `record_key = <table>:<pk>` joins the source rows, chunks, registry and me
 
 ### 2.1 `source.*` and `telemetry.*`
 
-The full DDL is in [`db/init/01_schema.sql`](../db/init/01_schema.sql). These are the design rules it follows:
+The full DDL is in [`db/migrations/`](../db/migrations/). These are the design rules it follows:
 
 - **`source.*` changes only when a business fact changes.** `source.flight_state`, `source.fare` and `source.airport` are captured by CDC. Every write is a change-aware upsert:
 
@@ -191,25 +196,72 @@ Each contract in [`contracts/freshness_sla.yaml`](../contracts/freshness_sla.yam
 
 ## 3. CDC
 
-The connector is `cdc/debezium/source-connector.json`:
+### 3.1 Connector
 
-| Setting | Value |
-|---|---|
-| `connector.class` | `io.debezium.connector.postgresql.PostgresConnector` |
-| `plugin.name` | `pgoutput` |
-| `table.include.list` | `source.flight_state,source.fare,source.airport` |
-| `topic.prefix` | `fcp` → topics `fcp.source.flight_state`, … |
-| Unwrap SMT | **Not** applied. The consumer needs the `before` and `after` values. |
+The connector config is [`cdc/debezium/fcp-source.json`](../cdc/debezium/fcp-source.json). `fcp cdc register` applies it with an idempotent `PUT /connectors/fcp-source/config`.
 
-`REPLICA IDENTITY FULL` is set on the source tables so the `before` image is complete.
+| Setting | Value | Why |
+|---|---|---|
+| `database.user` | `fcp_cdc` | Least-privilege role: `REPLICATION` plus `SELECT` on `source.*` only (ADR-012) |
+| `database.password` | `${env:FCP_CDC_PASSWORD}` | Resolved inside the Connect worker by `EnvVarConfigProvider`. The REST API and the stored config only ever show the placeholder |
+| `plugin.name` / `publication.name` | `pgoutput` / `fcp_source` | Built-in logical decoding. The publication comes from migration 0001 (`publication.autocreate.mode = disabled`) |
+| `table.include.list` | `source.flight_state, source.fare, source.airport` | `telemetry.*` and `freshness.*` are deliberately excluded (ADR-009) |
+| `snapshot.mode` | `initial` | Existing rows arrive once as `op = r`, then streaming starts |
+| Converters | JSON, `schemas.enable = false` | Small, readable messages; the schema is the Postgres table |
+| `decimal.handling.mode` | `string` | `fare_usd` arrives as `"226.75"`, never as a rounded float |
+| Topics | `fcp.source.<table>`, 3 partitions, 7-day retention, **created by `fcp cdc register`** | Keyed by primary key, so all changes to one record stay in order. Creating them up front means a consumer started on an empty database cannot miss the first events while waiting for the topic to appear (found by CI, which starts empty) |
+| Unwrap SMT | Not applied | The consumer needs both `before` and `after` |
 
-**Event contract** (the fields the consumer relies on):
+`REPLICA IDENTITY FULL` on the source tables makes the `before` image complete.
+
+**Delivery is at least once.** Connect saves its position every 10 s (`OFFSET_FLUSH_INTERVAL_MS`), so a crash can replay up to about 10 s of changes. If Connect's offsets are lost entirely, it falls back to a full re-snapshot; we saw this once during development, and it is how we found the Kafka log-dir bug (ADR-014). Every consumer must therefore be idempotent. The Phase 3 consumer is, because it skips any chunk whose content hash has not changed.
+
+### 3.2 Event contract
+
+This is a real message, captured from the local stack and stored in [`tests/fixtures/debezium/`](../tests/fixtures/debezium/), trimmed:
 
 ```json
-{ "op": "c|u|d|r", "ts_ms": 1759400000000,
-  "source": { "table": "fare", "lsn": 123456 },
-  "before": { ... } | null, "after": { ... } | null }
+{
+  "op": "u",
+  "ts_ms": 1791055750080,
+  "source": {
+    "schema": "source",
+    "table": "airport",
+    "ts_ms": 1791055749775,
+    "lsn": 36767864
+  },
+  "before": {
+    "ident": "TEST-FIXTURE",
+    "name": "Fixture Field",
+    "updated_at": "2026-10-03T19:29:09.773111Z",
+    "...": "..."
+  },
+  "after": {
+    "ident": "TEST-FIXTURE",
+    "name": "Fixture Field Renamed",
+    "updated_at": "2026-10-03T19:29:09.775405Z",
+    "...": "..."
+  }
+}
 ```
+
+`fcp.cdc.events.parse` turns every message into a `ChangeEvent`, which carries exactly what the brief asks for (record ID, change timestamp, delta):
+
+| Field | Meaning |
+|---|---|
+| `record_key` | `source.airport:TEST-FIXTURE`, the same key as `freshness.registry` and `index.chunks` |
+| `committed_at` | Postgres commit time (`source.ts_ms`) |
+| `captured_at` | When Debezium processed the change (`ts_ms`) |
+| `delta` | `{"name": ("Fixture Field", "Fixture Field Renamed")}`: only the columns that changed. `updated_at` is excluded because it changes with every business change |
+
+### 3.3 Operations
+
+| Command | What it does |
+|---|---|
+| `fcp cdc register` / `status` | Apply the config and wait until it is `RUNNING`; show its state |
+| `fcp cdc tail` | Live view: one line per event with its delta and commit-to-consumer latency |
+| `fcp cdc stats --seconds N` | p50 / p95 latency per table and operation, written to `metrics.cdc_window` |
+| Dagster sensor `cdc_connector_health` | Every 60 s. If the connector is missing or a task has failed, it runs `cdc_heal`, which re-registers or restarts only the failed tasks. Tested by deleting the connector: it resumed from saved offsets with no re-snapshot |
 
 ## 4. Selective re-index algorithm
 
@@ -424,7 +476,7 @@ flowchart LR
 | BTS On-Time | Weekly check; newest 6 months kept | Bulk download (about 32 MB per month), cached |
 | BTS DB1B Market | Weekly check; newest quarter | Bulk download (about 110 MB, 2.1 GB unzipped), cached |
 | OurAirports | Weekly | One CSV |
-| Fare drift simulator (Phase 2) | Every 15 min | Seasonality × days-to-departure curve × N(0, σ), plus Poisson(λ) shocks of ±15–40% |
+| Fare drift simulator (simulated) | Every 15 min | Each fare reprices with p = 0.04 per tick: a mean-reverting log-price step (θ = 0.2, σ = 0.06), plus rare shocks (p = 0.002, ±15–40%). Whole dollars, bounded to 0.4–2.5 × baseline. Ticks are idempotent (`ops.drift_tick`) |
 
 **Budget rules.** Every OpenSky call reserves its cost in `ops.api_budget` before it is made, using one conditional update, so concurrent runs cannot overspend. If the request never reached OpenSky, the credits are refunded. After each call the budget is reconciled with OpenSky's `X-Rate-Limit-Remaining` header.
 
@@ -452,7 +504,7 @@ Source details, filters and attribution are in [data-sources.md](data-sources.md
 
 ## 11. Phase 1 build checklist
 - [x] `docker-compose.yml` (Postgres 16 + pgvector 0.8.2, Kafka 4.3 KRaft, Debezium Connect 3.5) and `Makefile`
-- [x] `db/init/01_schema.sql`: every schema from §2
+- [x] Database schema for every table in §2 (now `db/migrations/0001_initial.sql`)
 - [x] `fcp.common.ratelimit`: daily credit budget with reconcile and refund
 - [x] OpenSky client and pollers (OAuth2, record and replay, states + flights)
 - [x] BTS On-Time and DB1B loaders → Iceberg raw
@@ -462,3 +514,14 @@ Source details, filters and attribution are in [data-sources.md](data-sources.md
 - [x] Dagster assets, jobs and schedules
 - [x] `docs/data-sources.md`
 - [x] CI: ruff, mypy `--strict`, and unit + integration tests against Postgres
+
+## 12. Phase 2 build checklist
+- [x] Versioned migrations (`fcp db upgrade`), adopting Phase 1 databases (ADR-013)
+- [x] Least-privilege `fcp_cdc` role; secret resolved through `EnvVarConfigProvider` (ADR-012)
+- [x] Debezium connector config plus idempotent registration; topics with 3 partitions and 7-day retention
+- [x] `ChangeEvent` parser (record ID, commit time, delta), tested against real captured messages
+- [x] `fcp cdc tail` and `fcp cdc stats` (latency written to `metrics.cdc_window`)
+- [x] Fare-drift simulator: reproducible, idempotent ticks, labelled as simulated; plus `drift shock` for the eval
+- [x] Dagster: `fare_drift` asset on a 15-minute schedule; `cdc_connector_health` self-healing sensor
+- [x] CI runs the full docker compose stack, including an end-to-end CDC test
+- [x] Fixed: Kafka data persistence and offset flush interval (ADR-014)

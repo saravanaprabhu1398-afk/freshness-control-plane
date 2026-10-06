@@ -115,4 +115,4 @@ Build a control plane that **detects** source changes, **re-indexes only what ch
 
 ## 9. Open questions
 1. Which model should the agent use? The default is Claude Sonnet, which is cheap enough for eval runs.
-2. Should simulated fare drift follow real DB1B seasonality, or a simple stochastic model? The proposal is seasonality plus random jumps.
+2. ~~Should simulated fare drift follow real DB1B seasonality, or a simple stochastic model?~~ **Resolved in Phase 2:** a stochastic model, with mean-reverting reprices plus rare shocks. One DB1B quarter cannot support a seasonal claim, so the simulator does not make one (SDD §8).

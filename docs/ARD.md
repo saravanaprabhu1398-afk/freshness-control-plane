@@ -131,6 +131,30 @@ The diagram source is [`diagrams/src/architecture.py`](diagrams/src/architecture
   - Fares in the demo describe 2025 Q2 price levels, and the case study says so.
   - Simulated drift (Phase 2) moves current fares away from this baseline. Drift is always labelled as simulated.
 
+### ADR-012 — A dedicated CDC role, with its secret resolved inside Connect
+- **Context:** Debezium needs `REPLICATION` and read access to the captured tables. Running it as the database owner would give a streaming component full write access. Putting the password in the connector config would store it in Kafka and expose it through the Connect REST API.
+- **Decision:** Debezium connects as `fcp_cdc` (migration 0002), which has `LOGIN REPLICATION` and `SELECT` on `source.*` only. The connector config says `${env:FCP_CDC_PASSWORD}`, which Kafka's `EnvVarConfigProvider` resolves inside the worker. The migrator sets the role's password from the same variable.
+- **Consequences:**
+  - `GET /connectors/fcp-source/config` returns the placeholder, never the secret (verified).
+  - The role cannot read `freshness`, `metrics` or `ops`.
+
+### ADR-013 — Versioned SQL migrations instead of image init scripts
+- **Context:** The Postgres image runs `docker-entrypoint-initdb.d` only on an empty data directory, so Phase 2's schema changes would never reach an existing environment.
+- **Decision:** `db/migrations/NNNN_name.sql`, applied in order by `fcp db upgrade` (run by `make up` and CI). Each file runs in its own transaction and is recorded with a SHA-256 checksum in `ops.schema_migrations`; editing an applied file is an error. Phase 1 databases adopt 0001 instead of re-running it.
+- **Consequences:**
+  - Any phase can change the schema safely.
+  - Migrations are forward-only; this is a portfolio stack, not a multi-tenant service.
+
+### ADR-014 — Kafka data on a real volume; delivery treated as at-least-once
+- **Context:** In development, recreating the Kafka container silently emptied every topic. The `apache/kafka` image writes to `/tmp/kraft-combined-logs` unless `KAFKA_LOG_DIRS` is set, so our volume was never used. Losing Connect's offsets then made Debezium re-snapshot every table. Separately, Connect saves source offsets only every 60 s by default, so a restart soon after a burst re-sends that burst.
+- **Decision:**
+  - Set `KAFKA_LOG_DIRS=/var/lib/kafka/data`; verified that topics and the connector survive a forced recreate.
+  - Save offsets every 10 s.
+  - Design every consumer to be idempotent rather than assume exactly-once delivery.
+- **Consequences:**
+  - A restart replays at most about 10 s of events (verified: a Connect restart produced no duplicates).
+  - The Phase 3 consumer must skip events whose chunk content hash is unchanged. It already does by design (SDD §4).
+
 ## 5. Deployment view (local)
 
 ```mermaid

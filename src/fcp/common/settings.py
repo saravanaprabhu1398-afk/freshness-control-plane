@@ -33,6 +33,15 @@ class Settings(BaseSettings):
     pg_db: str = "fcp"
     pg_user: str = "fcp"
     pg_password: SecretStr = SecretStr("fcp_local_only")
+    # Debezium's own least-privilege role (ADR-012)
+    cdc_password: SecretStr = SecretStr("fcp_cdc_local_only")
+
+    # Kafka / Debezium Connect (Phase 2)
+    kafka_bootstrap: str = "127.0.0.1:9092"
+    connect_url: str = "http://localhost:8083"
+    # Fare-drift simulator (Phase 2, simulated data). Same seed + same tick = same prices.
+    drift_seed: int = 20261002
+    drift_tick_minutes: int = Field(default=15, ge=1, le=1440)
 
     # OpenSky (ADR-003). Credentials are optional; see module docstring.
     opensky_client_id: str | None = Field(default=None, validation_alias="OPENSKY_CLIENT_ID")
