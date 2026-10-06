@@ -29,11 +29,16 @@ src/fcp/
   cdc/connect.py               Debezium connector: register, status, self-heal
   cdc/events.py                Debezium message -> ChangeEvent (record id, commit time, delta)
   cdc/consumer.py              Kafka consumption, `cdc tail`, `cdc stats`
+  reindex/chunker.py           record -> chunk text + content hash (pure)
+  reindex/embedder.py          bge-small via fastembed; deterministic test embedder
+  reindex/consumer.py          collapse -> hash-skip -> embed changed -> one transaction -> commit offsets
+  reindex/rebuild.py           full re-embed benchmark (naive baseline) and index recovery
+  reindex/report.py            savings vs three baselines; coverage and lag
   common/migrate.py            ordered SQL migrations (db/migrations)
   transform/dbt.py             runs dbt against the same catalog
   freshness/contracts.py       YAML -> freshness.contract
   orchestration/definitions.py Dagster assets, jobs, schedules
-  (Phase 3+: reindex/, agent/, eval/, dashboard/)
+  (Phase 4+: freshness enforcement, agent/, eval/, dashboard/)
 dbt/                           staging + marts over Iceberg (dbt-duckdb iceberg plugin)
 db/migrations/NNNN_*.sql       Postgres schema, applied in order by `fcp db upgrade`
 contracts/freshness_sla.yaml   freshness SLAs
@@ -285,45 +290,44 @@ sequenceDiagram
     PG-->>DBZ: WAL record (pgoutput)
     DBZ->>K: {op, before, after, ts_ms}
     K->>C: poll · micro-batch ≤ 64 events / 500 ms
-    C->>C: diff business columns → render chunk → sha256
+    C->>C: keep latest event per record → render chunk → sha256
     alt content hash unchanged
       C->>IX: log skip_same_hash
     else content hash changed
       C->>E: embed(chunk_text)
       E-->>C: vector(384)
-      C->>IX: BEGIN · upsert chunk · upsert registry · insert reindex_log · COMMIT
+      C->>IX: BEGIN · upsert chunk + source version · insert reindex_log · COMMIT
     end
     C->>K: commit offset (after DB commit → at-least-once, idempotent)
   end
 ```
 
-Pseudo-code:
+Implemented in [`src/fcp/reindex/`](../src/fcp/reindex/). The consumer group is `fcp-reindex`; a new group starts from the Debezium snapshot, so the first run builds the whole index.
 
-```
-on event e:
-  key      = e.source.table + ":" + pk(e.after or e.before)
-  if e.op == 'd':
-      delete from index.chunks where record_key = key; log; commit offset; return
-  changed  = {col for col in business_cols(table) if before[col] != after[col]}
-  if changed == ∅: log skip; commit; return               # e.g. housekeeping-only update
-  text     = chunker.render(table, e.after)                # deterministic template
-  h        = sha256(text)
-  if h == current_hash(key): log skip_same_hash; commit; return
-  vec      = embed(text)
-  BEGIN
-    upsert index.chunks(chunk_id, text, h, vec, data_as_of, indexed_at=now())
-    upsert freshness.registry(key, last_changed_at=now(), last_verified_at=now())
-    insert metrics.reindex_log(...)
-  COMMIT
-  commit kafka offset                                      # after DB commit → at-least-once, idempotent by hash
-```
+**Per micro-batch** (up to 64 events or 500 ms):
 
-- **One chunk per record in v1.** Records are small, and the templates are written as natural-language facts. For example: *"Fare JFK→LAX on DL economy: $289.00 as of 2026-10-02T14:00Z (simulated drift; DB1B Q2-2026 median $264.00)."*
-- **Batching.** The consumer micro-batches up to 64 events or 500 ms before embedding.
-- **Baseline benchmark.** `full_rebuild.py` re-embeds every record and logs to `metrics.full_rebuild_log`.
-- **Savings metric:**
-  `savings = 1 − Σ chunks_reembedded / (full_rebuild_chunks × rebuild_count_equivalent)`
-  Here `rebuild_count_equivalent` is how many times the naive approach would rebuild in the same window, for example hourly. The method is stated in the case study.
+| Step | What happens | Why |
+|---|---|---|
+| 1. Collapse | Keep only the latest event per record | A record that changed twice in the batch is embedded once |
+| 2. Render and hash | `chunker.build()` renders one natural-language chunk per record and hashes it (SHA-256) | Templates contain business facts only. `updated_at` never appears, so a write that changes no fact keeps the same hash |
+| 3. Skip | If the hash equals the indexed one, skip | Replays (at-least-once delivery, ADR-014) and no-op updates cost nothing |
+| 4. Embed | Embed the remaining chunks in one call (`BAAI/bge-small-en-v1.5`, 384-d, via fastembed/ONNX) | Batching keeps the model warm and amortises overhead |
+| 5. Write | One Postgres transaction: upsert or delete chunks; write `metrics.reindex_log` (one row per record) and `metrics.reindex_batch` | Index and metrics never disagree |
+| 6. Commit offsets | Commit Kafka offsets only after the database commit | A crash between steps 5 and 6 replays the batch, and step 3 turns the replay into skips |
+
+**Chunk example (real):** *"Fare John F. Kennedy International (JFK) to Los Angeles International (LAX) on DL (Delta Air Lines), all cabins: $548.50 one way. This is the real BTS DB1B 2025-Q2 median for this route and carrier: $548.50 from 3,656 sampled tickets."* Simulated fares say "This is a SIMULATED current price" in the text itself.
+
+**Each chunk records the source version it was built from** (`source_changed_at` = the row's `updated_at`). If `source.<table>.updated_at > chunks.source_changed_at`, the index is behind the source (ADR-015). `fcp reindex status` reports this per table as `behind`, alongside missing and orphaned chunks and the consumer's Kafka lag.
+
+**Savings are measured against three explicit baselines** (`fcp reindex report`), from least to most naive:
+
+| Baseline | Embeds counted | What it isolates |
+|---|---|---|
+| Every change event | One per change event, with no collapsing and no hash check | What the consumer itself saves |
+| Every row refreshed | Every row each refresh job touched, changed or not | What change-aware writes plus CDC save upstream |
+| Full corpus per refresh | The whole corpus each time a refresh job wrote anything | The common naive RAG pipeline. Tokens and time come from `fcp reindex benchmark` |
+
+Only work done by the real model is counted. Rows written by the tests' hash embedder are excluded.
 
 ## 5. Freshness SLA enforcement
 
@@ -525,3 +529,14 @@ Source details, filters and attribution are in [data-sources.md](data-sources.md
 - [x] Dagster: `fare_drift` asset on a 15-minute schedule; `cdc_connector_health` self-healing sensor
 - [x] CI runs the full docker compose stack, including an end-to-end CDC test
 - [x] Fixed: Kafka data persistence and offset flush interval (ADR-014)
+
+## 13. Phase 3 build checklist
+- [x] Migration 0005: per-chunk source version, model and tokens; `metrics.reindex_batch`; richer rebuild log
+- [x] Chunker: deterministic natural-language chunks, facts only, simulated values labelled in the text
+- [x] Embedder: bge-small-en-v1.5 via fastembed (ONNX); deterministic hash embedder for tests (ADR-005 revised)
+- [x] Consumer: collapse, hash skip, batch embed, one transaction, then commit offsets; clean stop on SIGTERM or a stop event
+- [x] Full re-embed benchmark and `--apply` recovery; weekly Dagster schedule keeps the baseline current
+- [x] `fcp reindex status` (missing / behind / orphaned per table, consumer lag) and `fcp reindex report` (three baselines)
+- [x] Container image and a Compose `reindex` service (`make up-app`)
+- [x] Tests: chunker, planning, report maths, process_batch against pgvector, Kafka end to end, real-model retrieval
+- [x] ADR-015 (index lag is staleness) and ADR-016 (registry owned by ingestion)

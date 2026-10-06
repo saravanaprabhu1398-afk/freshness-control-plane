@@ -154,11 +154,11 @@ node(965, 300, 225, 135, "Kafka (KRaft)", ["One topic per source table"], "cdc",
 
 # Index & freshness
 node(1245, 150, 395, 110, "Selective re-index consumer", ["Re-embeds only chunks whose content hash changed", "Micro-batch ≤64 events / 500 ms · idempotent"],
-     "index", mono_lines=["diff → render chunk → sha256 → embed → upsert"])
+     "index", mono_lines=["collapse → render → sha256 → embed changed"])
 out.append('<rect x="1240" y="305" width="405" height="150" rx="12" fill="none" stroke="#7C3AED" stroke-opacity="0.55" stroke-dasharray="5 4"/>')
-text(1252, 322, "one Postgres txn", 10.5, 600, "#7C3AED")
-node(1255, 333, 185, 112, "pgvector", ["index.chunks", "bge-small · 384-d · HNSW"], "index")
-node(1450, 333, 185, 112, "Freshness registry", ["freshness.registry", "last_verified_at per record"], "index")
+text(1252, 322, "same Postgres", 10.5, 600, "#7C3AED")
+node(1255, 333, 185, 112, "pgvector", ["index.chunks · HNSW", "+ source version (lag)"], "index")
+node(1450, 333, 185, 112, "Freshness registry", ["last_verified_at per record", "written by ingestion only"], "index")
 node(1245, 480, 195, 100, "SLA enforcer", ["Dagster sensor · 60 s", "Detects & resolves breaches"], "index")
 node(1450, 480, 190, 100, "Freshness contracts", ["Versioned YAML, no deploy", "fare 24 h · status 15 min"], "index",
      mono_lines=["freshness_sla.yaml"])
@@ -202,9 +202,7 @@ step(1095, 275, 3)
 edge([(1190, 368), (1217, 368), (1217, 212), (1245, 212)], hot=True)
 step(1217, 300, 4)
 edge([(1400, 260), (1400, 333)], hot=True)
-edge([(1590, 260), (1590, 333)], hot=True)
 step(1400, 292, 5)
-step(1590, 292, 5)
 edge([(1542, 445), (1542, 465), (1342, 465), (1342, 480)])
 edge([(1450, 545), (1440, 545)])
 # index → serving

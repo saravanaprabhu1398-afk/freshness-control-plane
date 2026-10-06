@@ -34,7 +34,7 @@ The diagram source is [`diagrams/src/architecture.py`](diagrams/src/architecture
 | Source DB | Current operational state that CDC watches | Postgres 16 (`wal_level=logical`) |
 | Lake / baseline | Immutable history and ground truth | Iceberg (PyIceberg SQL catalog), dbt-duckdb |
 | CDC | Turn row changes into events | Debezium Postgres connector, Kafka (KRaft) |
-| Re-index consumer | Compare changes, rebuild chunks, check hashes, embed only changed chunks, upsert vectors | Python, confluent-kafka, sentence-transformers |
+| Re-index consumer | Collapse events, rebuild chunks, check hashes, embed only changed chunks, upsert vectors | Python, confluent-kafka, fastembed (ONNX) |
 | Vector index | Retrieval | pgvector (HNSW) |
 | Freshness registry | `last_verified_at` per record and chunk | Postgres schema `freshness` |
 | SLA enforcer | Evaluate contracts and record breaches | Dagster sensor every 1 min |
@@ -90,10 +90,11 @@ The diagram source is [`diagrams/src/architecture.py`](diagrams/src/architecture
   - Not tuned for very large scale, which is acceptable at about 10⁵ chunks.
 
 ### ADR-005 — Local embedding model
-- **Decision:** `BAAI/bge-small-en-v1.5` (384 dimensions) via sentence-transformers.
+- **Decision:** `BAAI/bge-small-en-v1.5` (384 dimensions), run through **fastembed** (ONNX Runtime). *Revised in Phase 3:* the original plan named sentence-transformers. fastembed gives the same model without PyTorch (a 64 MB model download instead of a ~700 MB framework install), plus the model's own tokenizer for exact token counts.
 - **Consequences:**
-  - Zero cost, and it runs offline.
-  - Cost savings are reported in embedding operations and seconds, and converted to $ at a published API embedding price for the case study, with the method stated.
+  - Zero cost, and it runs offline once the model is cached in `data/models` (CI caches it too).
+  - About 3–6 ms per chunk on an Apple-silicon laptop.
+  - Cost is reported in **tokens counted by the model's tokenizer** and in embedding seconds. Any dollar figure in the case study states the price per token it assumes.
 
 ### ADR-006 — Freshness enforced at query time, not only at ingest
 - **Decision:** The agent calls a `check_freshness(chunk_ids)` tool before it answers. The response format requires a freshness label.
@@ -154,6 +155,20 @@ The diagram source is [`diagrams/src/architecture.py`](diagrams/src/architecture
 - **Consequences:**
   - A restart replays at most about 10 s of events (verified: a Connect restart produced no duplicates).
   - The Phase 3 consumer must skip events whose chunk content hash is unchanged. It already does by design (SDD §4).
+
+### ADR-015 — Index lag is a source of staleness, measured per chunk
+- **Context:** A record can be freshly verified at its source while the vector index still holds an older version, for example if the re-index consumer is paused, behind, or crashed. A query-time check that only looks at source verification would call that answer fresh. This is the exact failure the project exists to catch, and the Phase 6 evaluation deliberately creates it.
+- **Decision:** Each chunk stores `source_changed_at`, the source row's `updated_at` at the time it was embedded. The index is behind for a record when `source.<table>.updated_at > chunks.source_changed_at`. Both timestamps come from the same Postgres clock, so the comparison is exact.
+- **Consequences:**
+  - `fcp reindex status` reports chunks that are missing, behind or orphaned, per table.
+  - Phase 5's `check_freshness` must combine source freshness (contract clock) with index lag. An answer built from a chunk that is behind is never `VERIFIED`.
+
+### ADR-016 — The freshness registry belongs to ingestion, not to the index
+- **Context:** The SDD originally had the consumer update `freshness.registry` in its own transaction.
+- **Decision:** Only ingestion writes the registry: it knows when a value was verified and when it changed. The consumer writes chunks and metrics only. The index's own freshness is the source version stored on each chunk (ADR-015).
+- **Consequences:**
+  - One writer per fact.
+  - The registry stays correct even while the consumer is down, which is exactly when it matters.
 
 ## 5. Deployment view (local)
 

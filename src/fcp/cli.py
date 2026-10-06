@@ -148,6 +148,13 @@ def main(argv: list[str] | None = None) -> int:
     cdc.add_argument("--table", action="append", help="tail: only this table, e.g. source.fare")
     cdc.add_argument("--from-beginning", action="store_true", help="tail: replay retained events")
 
+    rx = sub.add_parser("reindex", help="selective re-index consumer and savings")
+    rx.add_argument("action", choices=["run", "benchmark", "report", "status"])
+    rx.add_argument("--seconds", type=float, help="run: stop after N seconds (default: until Ctrl-C)")
+    rx.add_argument("--apply", action="store_true", help="benchmark: also rebuild the index from source")
+    rx.add_argument("--hours", type=float, default=24, help="report: window size")
+    rx.add_argument("--since", help="report: ISO timestamp to measure from (overrides --hours)")
+
     dr = sub.add_parser("drift", help="fare-drift simulator (SIMULATED data)")
     dr.add_argument("action", choices=["tick", "shock"])
     dr.add_argument("--fraction", type=float, default=0.2, help="shock: share of fares to move")
@@ -178,6 +185,8 @@ def main(argv: list[str] | None = None) -> int:
         log.info("db.upgraded", applied=migrate.upgrade())
     elif args.cmd == "cdc":
         _cdc(args)
+    elif args.cmd == "reindex":
+        _reindex(args)
     elif args.cmd == "drift":
         from fcp.ingestion.fares import drift
 
@@ -193,6 +202,44 @@ def main(argv: list[str] | None = None) -> int:
             detail=stats.detail,
         )
     return 0
+
+
+def _reindex(args: argparse.Namespace) -> None:
+    from datetime import timedelta
+
+    from fcp.reindex import consumer, rebuild, report
+
+    if args.action == "run":
+        totals = consumer.run(seconds=args.seconds)
+        log.info(
+            "reindex.done",
+            embedded=totals.embedded,
+            skipped=totals.skipped,
+            deleted=totals.deleted,
+            collapsed=totals.collapsed,
+        )
+    elif args.action == "benchmark":
+        r = rebuild.benchmark(apply=args.apply)
+        print(
+            f"full re-embed: {r.chunks:,} chunks, {r.tokens:,} tokens, {r.embed_ms / 1000:.1f} s "
+            f"({r.embed_ms / max(r.chunks, 1):.2f} ms/chunk){'  [index rebuilt]' if r.applied else ''}"
+        )
+        for table, n in sorted(r.by_table.items()):
+            print(f"  {table:<22} {n:>7,}")
+    elif args.action == "report":
+        from datetime import datetime
+
+        since = datetime.fromisoformat(args.since) if args.since else None
+        print(report.format_report(report.compute(timedelta(hours=args.hours), since=since)))
+    else:
+        print(f"{'table':<22} {'source':>8} {'chunks':>8} {'missing':>8} {'behind':>8} {'orphans':>8}")
+        for c in report.coverage():
+            print(
+                f"{c.table:<22} {c.source_rows:>8,} {c.chunks:>8,} {c.missing:>8,} "
+                f"{c.behind:>8,} {c.orphans:>8,}"
+            )
+        lag = report.consumer_lag(consumer.GROUP_ID)
+        print("consumer lag (messages): " + ", ".join(f"{t.split('.')[-1]}={n:,}" for t, n in lag.items()))
 
 
 def _cdc(args: argparse.Namespace) -> None:

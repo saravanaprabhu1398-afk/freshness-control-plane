@@ -131,6 +131,22 @@ def fare_drift() -> dg.MaterializeResult[Any]:
     return _result(drift.run_tick())
 
 
+# ----------------------------------------------------------------------------- re-index baseline
+
+
+@dg.op(description="Embed the whole corpus once (index untouched) to keep the naive baseline current.")
+def full_rebuild_benchmark(context: dg.OpExecutionContext) -> None:
+    from fcp.reindex import rebuild
+
+    r = rebuild.benchmark()
+    context.log.info(f"{r.chunks} chunks, {r.tokens} tokens, {r.embed_ms} ms")
+
+
+@dg.job(description="Full re-embed benchmark: the baseline the savings report compares against.")
+def reindex_benchmark() -> None:
+    full_rebuild_benchmark()
+
+
 # ----------------------------------------------------------------------------- CDC health
 
 
@@ -187,12 +203,14 @@ defs = dg.Definitions(
         opensky_flights,
         fare_drift,
     ],
-    jobs=[baseline_job, live_states_job, flights_job, drift_job, cdc_heal],
+    jobs=[baseline_job, live_states_job, flights_job, drift_job, cdc_heal, reindex_benchmark],
     sensors=[cdc_connector_health],
     schedules=[
         dg.ScheduleDefinition(job=live_states_job, cron_schedule=STATES_CRON, execution_timezone="UTC"),
         dg.ScheduleDefinition(job=flights_job, cron_schedule="0 6 * * *", execution_timezone="UTC"),
         dg.ScheduleDefinition(job=drift_job, cron_schedule="*/15 * * * *", execution_timezone="UTC"),
+        # The corpus grows with every new flight, so re-measure the naive baseline weekly.
+        dg.ScheduleDefinition(job=reindex_benchmark, cron_schedule="30 3 * * 1", execution_timezone="UTC"),
         # BTS publishes monthly; checking weekly picks up a new month within days at no API cost.
         dg.ScheduleDefinition(job=baseline_job, cron_schedule="0 3 * * 1", execution_timezone="UTC"),
     ],

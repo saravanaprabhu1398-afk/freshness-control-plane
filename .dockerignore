@@ -1,0 +1,14 @@
+.git
+.venv
+.dagster
+.mypy_cache
+.ruff_cache
+.pytest_cache
+data
+warehouse
+dbt/target
+dbt/logs
+docs
+tests
+**/__pycache__
+.env
